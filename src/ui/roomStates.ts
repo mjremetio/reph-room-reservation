@@ -87,6 +87,8 @@ export function shortName(name: string): string {
   return first ? `${last}, ${first[0]}.` : name;
 }
 
+const BLOCKED = 'Blocked by Admin';
+
 /**
  * Who holds the room at the selected time: owner name (and division), or "You". Only what the privacy
  * rule allows for other people's bookings (owner, division, time, group size).
@@ -94,9 +96,10 @@ export function shortName(name: string): string {
 export function reservedBy(status: RoomStatus | undefined): { short: string; full: string; count: number } | null {
   if (!status || status.busy.length === 0) return null;
   const sorted = [...status.busy].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
-  const people = [...new Map(sorted.map((b) => [b.mine ? 'You' : b.owner, b] as const)).values()];
+  const who = (b: PublicBooking) => (b.mine ? 'You' : b.status === 'Blocked' ? BLOCKED : b.owner);
+  const people = [...new Map(sorted.map((b) => [who(b), b] as const)).values()];
   const first = people[0] as PublicBooking;
-  const short = (first.mine ? 'You' : shortName(first.owner)) + (people.length > 1 ? ` +${people.length - 1}` : '');
-  const full = people.map((b) => (b.mine ? 'You' : `${b.owner}${b.division ? ` (${b.division})` : ''}`)).join('; ');
+  const short = (first.mine || first.status === 'Blocked' ? who(first) : shortName(first.owner)) + (people.length > 1 ? ` +${people.length - 1}` : '');
+  const full = people.map((b) => (b.mine || b.status === 'Blocked' ? who(b) : `${b.owner}${b.division ? ` (${b.division})` : ''}`)).join('; ');
   return { short, full, count: people.length };
 }

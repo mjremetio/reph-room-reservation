@@ -39,8 +39,12 @@ export interface Room {
 /** What a signed-in account may do: `admin` runs the Admin pages (/admin); everyone books as themselves. */
 export type Role = 'admin' | 'user';
 
-/** Statuses used by the current tool, plus "Held" for short-lived assistant proposals. */
-export type BookingStatus = 'Held' | 'In Progress' | 'Approved' | 'Checked-In' | 'Completed' | 'Cancelled';
+/**
+ * Statuses used by the current tool, plus "Held" for short-lived assistant proposals and "Blocked" (ours, 1 Oct 2026):
+ * Admin blocked the room for that time (maintenance, an event). A block holds its room like a booking; its agenda is the
+ * reason and its owner the Admin who blocked it.
+ */
+export type BookingStatus = 'Held' | 'In Progress' | 'Approved' | 'Checked-In' | 'Completed' | 'Cancelled' | 'Blocked';
 
 export interface Person {
   /** "Last, First", like the current tool. */

@@ -37,21 +37,25 @@ function formFields(b: Booking) {
   };
 }
 
+/** Admin's room block is nobody's booking: people see that Admin blocked the room, not who did it or why. */
+export const shownOwner = (b: Booking) => (b.status === 'Blocked' ? 'Admin' : b.owner.name);
+
 /**
  * A booking as another person may see it: owner name, division, time, group size and status.
  * The viewer's own bookings also carry the rest of the tool's fields (agenda, category, priority, training type,
  * special instructions, hardware, recurrence, created by/at, modified by, admin comments) and `mine: true`. Never emails.
  */
 export function publicBooking(b: Booking, viewerEmail: string) {
-  const mine = sameEmail(b.owner.email, viewerEmail);
+  const block = b.status === 'Blocked';
+  const mine = !block && sameEmail(b.owner.email, viewerEmail);
   return {
     ticketNo: b.ticketNo,
     roomId: b.roomId,
     start: iso(b.start),
     end: iso(b.end),
     status: b.status,
-    owner: b.owner.name,
-    division: b.owner.division ?? null,
+    owner: shownOwner(b),
+    division: block ? null : (b.owner.division ?? null),
     participants: b.participants,
     mine,
     ...(mine ? formFields(b) : {}),
@@ -61,7 +65,7 @@ export type PublicBooking = ReturnType<typeof publicBooking>;
 
 /** A booking as Admin sees it, only in /api/admin/* responses: every field of the tool and the owner's e-mail. */
 export function adminBooking(b: Booking, viewerEmail: string) {
-  return { ...publicBooking(b, viewerEmail), ...formFields(b), ownerEmail: b.owner.email ?? null };
+  return { ...publicBooking(b, viewerEmail), owner: b.owner.name, division: b.owner.division ?? null, ...formFields(b), ownerEmail: b.owner.email ?? null };
 }
 export type AdminBooking = ReturnType<typeof adminBooking>;
 
@@ -82,11 +86,11 @@ function resultView(m: RoomMatch, viewerEmail: string, rank?: number): RoomResul
             ticketNo: b.ticketNo,
             start: iso(b.start),
             end: iso(b.end),
-            owner: b.owner.name,
-            division: b.owner.division,
+            owner: shownOwner(b),
+            division: b.status === 'Blocked' ? undefined : b.owner.division,
             participants: b.participants,
             status: b.status,
-            mine: sameEmail(b.owner.email, viewerEmail),
+            mine: b.status !== 'Blocked' && sameEmail(b.owner.email, viewerEmail),
           })),
   };
 }

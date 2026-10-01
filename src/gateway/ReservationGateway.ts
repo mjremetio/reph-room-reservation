@@ -17,6 +17,19 @@ export interface NewBooking {
   recurrence?: Recurrence;
 }
 
+/** Admin blocks rooms for a time (maintenance, an event): see blockRooms. */
+export interface RoomBlock {
+  roomIds: string[];
+  start: Date;
+  end: Date;
+  reason: string;
+}
+
+/** Admin books several rooms at once, each for every date of the recurrence, for `requester`: see bulkBook. */
+export interface BulkBooking extends Omit<NewBooking, 'roomId'> {
+  roomIds: string[];
+}
+
 export class ConflictError extends Error {
   readonly conflicts: Booking[];
   /** 'room': someone holds the room; 'requester': the requester already has another room then (RULES.oneRoomPerPersonAtATime). */
@@ -34,6 +47,11 @@ export class NotAllowedError extends Error {
     super(message);
     this.name = 'NotAllowedError';
   }
+}
+
+/** Why a room block can't be changed, moved or swapped: Admin lifts it (cancelBooking) and blocks again. */
+export function blockIsFixed(b: Pick<Booking, 'ticketNo'>): string {
+  return `${b.ticketNo} is a room block: lift it, then block the room again for the new time.`;
 }
 
 export class NotFoundError extends Error {
@@ -117,4 +135,16 @@ export interface ReservationGateway {
   swapRooms(ticketA: string, ticketB: string, by: Actor): Promise<[Booking, Booking]>;
   /** Admin: changes a room's details. */
   updateRoom(roomId: string, changes: RoomChanges, by: Actor): Promise<Room>;
+  /**
+   * Admin: blocks each room for the time ("Blocked": it holds the room, so nobody else can book it then). The bookings
+   * already there are cancelled first if they are in `cancel` (the tickets Admin saw and agreed to cancel); any other
+   * stops it (ConflictError lists them), and so does another block (NotAllowedError: lift it first). All or none.
+   */
+  blockRooms(block: RoomBlock, by: Actor, cancel: readonly string[]): Promise<{ blocks: Booking[]; cancelled: Booking[] }>;
+  /**
+   * Admin: books every room, for every date of the recurrence, Approved at once; each room must take the type of agenda
+   * and the group, and one person may hold all of them. The bookings already there are cancelled first if they are in
+   * `cancel`, as for blockRooms. All or none.
+   */
+  bulkBook(req: BulkBooking, by: Actor, cancel: readonly string[]): Promise<{ created: Booking[]; cancelled: Booking[] }>;
 }

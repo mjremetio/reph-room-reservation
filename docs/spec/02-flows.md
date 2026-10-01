@@ -191,7 +191,7 @@ Every minute: bookings still Approved or In Progress 15 minutes after the start,
 ## F14 · Table view [P1]
 **Table** in the view toggle. Both tabs are paginated (10/25/50/100 rows) and clicking a row (or Enter) opens its details.
 - **Rooms**: every room with status at the selected time, who holds it, what happens next and bookings today; search, filters (floor, type, equipment, status, min seats, self-service only), sortable columns, **Book** and **Map** per row, **Clear filters**, **Export CSV**; clicking a row (or Enter on it) opens the room sheet. No count line and no Refresh button: the pager shows the numbers and the data refetches every minute.
-- **Bookings**: **the Room Reservation Tool's reservation list** (`GET /api/bookings`, every status) with its search panel (reservation date from–to, type of agenda, site, building, room, employee name) plus status, mine only and at-the-selected-time only; the tool's columns (Ticket No, Agenda, Employee, Division, Category, Building, Room, Starts At, Ends At, Created By, Created Date, Status) plus People and actions (**Details**, **Check in**, **Cancel…**, **Ask to swap**, **Map**); a row opens Booking details (the form, read-only); CSV with every form field.
+- **Bookings**: **the Room Reservation Tool's reservation list** (`GET /api/bookings`, every status) with its search panel (reservation date from–to, type of agenda, site, building, room, employee name) plus status, mine only and at-the-selected-time only; it opens on every booking, past and future, everyone's (the privacy rule as everywhere), and the dates narrow it; the tool's columns (Ticket No, Agenda, Employee, Division, Category, Building, Room, Starts At, Ends At, Created By, Created Date, Status) plus People and actions (**Details**, **Check in**, **Cancel…**, **Ask to swap**, **Map**); a row opens Booking details (the form, read-only); CSV with every form field.
 
 - **AC-14.1** Filters combine; the pager's range shows the filtered count ("1–25 of 35"); changing a filter goes back to page 1.
 - **AC-14.2** Other people's rows never show agenda, category, created by/date or the other form fields, in the table, the details or the CSV. Filtering them by type of agenda uses the kind of room, so their category is never revealed.
@@ -349,6 +349,7 @@ At `/admin/bookings` (or from the dashboard): every booking in a range (today, t
 2. **Change…** room, start, end, participants, agenda, type or priority: the usual rules, except that Admin may book beyond the booking window, use Admin-only rooms and set Urgent (`RULES.adminMayOverride`); the room must be free and, when the time moves, the owner can't hold another room then.
 3. **Swap rooms…** with another open booking (overlapping ones first): each keeps its time and both rooms must be free for the other.
 4. **Cancel…** (optional reason) or **Check in** someone inside the check-in window.
+5. **Block rooms…** for a time (F35) or **Bulk booking…** of several rooms at once (F36), from the page header; a room block opens with **Lift block…** only.
 
 - **AC-30.1** Only an Admin can do any of this (403 "Admin only." for everyone else, 401 when signed out); the assistant and MCP never act as Admin.
 - **AC-30.2** A change or swap that clashes changes nothing and names who has the room then ("The room is taken then. Remetio, Mark Joseph has Tokyo, 2F · Mon, Sep 28, 10:00 AM – 11:00 AM (RM-0129902).").
@@ -368,9 +369,9 @@ At `/admin/users`: everyone who can sign in (name, username, e-mail, division, r
 - **AC-32.2** No-shows are Approved or In Progress bookings not checked in 15 minutes after the start.
 
 ## F33 · Admin assistant [P1]
-The panel on the right of every Admin page (Hide / Assistant). "What needs approval?", "Any no-shows today?", "Which rooms were busiest this week?", "Move Alpha's 9:30 booking to Paris", "Swap RM-0129908 and RM-0129909", "Ask Charlie for a clearer agenda": it looks things up with its tools and prepares an **Approve / Turn down / Cancel / Check in**, **Apply change**, **Swap rooms** or **Send** card. Only the card's button changes anything, through the same `/api/admin/*` routes as the pages. It can't manage accounts or rooms (it points to those pages).
+The panel on the right of every Admin page (Hide / Assistant). "What needs approval?", "Any no-shows today?", "Which rooms were busiest this week?", "Move Alpha's 9:30 booking to Paris", "Swap RM-0129908 and RM-0129909", "Ask Charlie for a clearer agenda": it looks things up with its tools and prepares an **Approve / Turn down / Cancel / Check in**, **Apply change**, **Swap rooms**, **Block** (F35), **Book N** (F36) or **Send** card. Only the card's button changes anything, through the same `/api/admin/*` routes as the pages. It can't manage accounts or rooms (it points to those pages).
 
-- **AC-33.1** The assistant never says approved, changed, swapped, cancelled or sent before the Admin presses the card's button.
+- **AC-33.1** The assistant never says approved, changed, swapped, cancelled, blocked, booked or sent before the Admin presses the card's button (evals `admin-block`, `admin-bulk`).
 - **AC-33.2** Turning a request down needs a reason: without one, it asks.
 - **AC-33.3** Off-topic messages get the fixed Admin reply without running the model.
 
@@ -382,6 +383,22 @@ At the owner's request (1 Oct 2026; guidelines p.6, p.11): an Approved or In Pro
 - **AC-34.3** The audit log has `booking.release` by "REPH Rooms" (`SYSTEM`) with the room and time; Admin gets a notice ("RM-… released: nobody checked in"); the owner gets an automatic note in the booking's thread: "Released: nobody checked in within 15 minutes of the start, so the room is free for others. Book again if you still need it."
 - **AC-34.4** Admin's reports and dashboard count it as a no-show (`releasedAt`).
 - **AC-34.5** My bookings shows the deadline on each Approved or In Progress booking: "Check in from 2:00 PM to 3:15 PM, or the room is released." before the window opens, "Check in by 3:15 PM, or the room is released." while it is open.
+
+## F35 · Admin blocks rooms [P1]
+At the owner's request (1 Oct 2026): Admin closes rooms for a time (maintenance, an event, a visit), so nobody else can book them then. At `/admin/bookings`, **Block rooms…**: tick the rooms (by floor, up to 30), the time (or **Whole days**, up to 92 days) and a reason (for Admin, and for the owners of the bookings it cancels). **Check bookings in the way** lists the bookings holding any of those rooms then; nothing changes yet. **Block and cancel N bookings** (or **Block N rooms** when nothing is in the way) blocks them and cancels exactly those, each owner getting a note in Messages: "Admin blocked <room · time> (<reason>), so this booking is cancelled. Please book another room or time." A block is a booking with status **Blocked** (owner: the Admin, agenda: the reason, 0 people). The Admin assistant prepares the same as a card (`prepare_room_block`).
+1. Everyone else sees "Blocked by Admin" on the map, in the table and in searches (owner "Admin": no name, division or reason); the room assistant says Admin closed the room then and offers another room or time (no swap, nobody to message).
+2. Open the block in Bookings and **Lift block…** to free the room at once (logged `booking.unblock`; no message). A block can't be changed, moved or swapped: lift it and block again.
+3. A block is nobody's own booking (not in My bookings, not counted for one room per person), is never released as a no-show and is not counted in reports.
+
+- **AC-35.1** A booking made after Check stops the block (409 naming it) instead of being cancelled unseen: the button sends the tickets Admin saw (`cancel`), and the gateway cancels only those.
+- **AC-35.2** Another block in the way stops a block or a bulk booking (403 "Admin already blocked <room · time>: <reason> (RM-…). Lift that block first…").
+- **AC-35.3** The audit log has `booking.block` for each room and `booking.cancel` for each booking it cancelled; other Admins get a notice.
+
+## F36 · Admin books several rooms at once [P1]
+At `/admin/bookings`, **Bulk booking…**: tick the rooms, then **For** (the Admin, or anyone with an active account or in the tool's employee list), the agenda, type and group (in each room), the time, an optional repeat (every day, or every week on chosen days, until a date), priority, type of training and special instructions. **Check bookings in the way** says how many bookings it makes (rooms × dates, up to 100), for whom, and lists the bookings in the way; **Book N** (or **Book N and cancel M bookings**) books them all, Approved at once, or none. Each room must take the type and the group (the room booking list binds Admin too); Admin may book beyond the booking window and use Admin-only rooms. One person may hold all of them at once. Someone booked for gets "Admin booked this for you: <room · time>." in Messages; the owners of cancelled bookings get "Admin needs <room · time> for "<agenda>", so this booking is cancelled. Please book another room or time." The Admin assistant prepares the same as a card (`prepare_bulk_booking`).
+
+- **AC-36.1** Amsterdam and Cape Town for Jeremiah, Thu 1:00–2:00 PM, "Sales huddle", 5 people, with Lili's Amsterdam booking in the way: 409 until Admin agrees to cancel it; then two Approved bookings for Jeremiah, and Lili's note says why hers went (`admin.test.ts`).
+- **AC-36.2** A room that doesn't take the type is refused ("Snowdon can be booked for Training only, not Meeting."), and so is someone unknown ("… has no account and is not in the employee list.").
 
 ## Edge cases
 | Case | Expected behavior |

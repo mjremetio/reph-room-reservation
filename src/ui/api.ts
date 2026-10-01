@@ -2,7 +2,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import type { AdminChangeJson, AlternativeView, ProposalView, RoomResultView } from '../agent/context';
+import type { AdminBlockJson, AdminBulkJson, AdminChangeJson, AlternativeView, ProposalView, RoomResultView } from '../agent/context';
 import type { Report } from '../domain/reports';
 import type { AccountView } from '../lib/accounts';
 import type { AuditView } from '../lib/audit';
@@ -111,10 +111,10 @@ export interface BookingRequest {
   recurrence?: RecurrenceJson;
 }
 
-/** Filters of GET /api/bookings: the tool's search panel plus status. */
+/** Filters of GET /api/bookings: the tool's search panel plus status. No dates = every booking, past and future. */
 export interface BookingsFilter {
-  from: Date;
-  to: Date;
+  from?: Date;
+  to?: Date;
   agendaType?: AgendaType;
   site?: 'Manila' | 'Iloilo';
   building?: string;
@@ -168,7 +168,9 @@ export const api = {
   confirm: (proposalId: string) =>
     call<{ ok: true; booking?: PublicBooking; dates?: number; ticketNo?: string }>(`/api/proposals/${encodeURIComponent(proposalId)}`, { method: 'POST' }),
   bookings: (f: BookingsFilter) => {
-    const q = new URLSearchParams({ from: toManilaIso(f.from), to: toManilaIso(f.to) });
+    const q = new URLSearchParams();
+    if (f.from) q.set('from', toManilaIso(f.from));
+    if (f.to) q.set('to', toManilaIso(f.to));
     for (const k of ['agendaType', 'site', 'building', 'roomId', 'employee', 'status'] as const) if (f[k]) q.set(k, String(f[k]));
     return call<{ ok: true; bookings: PublicBooking[] }>(`/api/bookings?${q}`).then((r) => r.bookings);
   },
@@ -199,6 +201,16 @@ export const adminApi = {
   approveMany: (ticketNos: string[]) =>
     call<{ ok: true; approved: string[]; failed: Array<{ ticketNo: string; message: string }> }>('/api/admin/bookings/approve', { method: 'POST', body: JSON.stringify({ ticketNos }) }),
   swap: (a: string, b: string) => call<{ ok: true; bookings: AdminBooking[] }>('/api/admin/bookings/swap', { method: 'POST', body: JSON.stringify({ a, b }) }),
+  /** The bookings a block would cancel (nothing changes). */
+  blockPreview: (body: AdminBlockJson) => call<{ ok: true; affected: AdminBooking[] }>('/api/admin/blocks', { method: 'POST', body: JSON.stringify({ ...body, dryRun: true }) }),
+  /** Blocks the rooms, cancelling `cancel` (the tickets Admin saw); any other booking in the way stops it. */
+  block: (body: AdminBlockJson, cancel: string[]) =>
+    call<{ ok: true; blocks: AdminBooking[]; cancelled: AdminBooking[] }>('/api/admin/blocks', { method: 'POST', body: JSON.stringify({ ...body, cancel }) }),
+  /** How many bookings a bulk booking makes, for whom, and the bookings it would cancel (nothing changes). */
+  bulkPreview: (body: AdminBulkJson) =>
+    call<{ ok: true; count: number; owner: string; affected: AdminBooking[] }>('/api/admin/bookings/bulk', { method: 'POST', body: JSON.stringify({ ...body, dryRun: true }) }),
+  bulk: (body: AdminBulkJson, cancel: string[]) =>
+    call<{ ok: true; created: AdminBooking[]; cancelled: AdminBooking[] }>('/api/admin/bookings/bulk', { method: 'POST', body: JSON.stringify({ ...body, cancel }) }),
   reports: (from: Date, to: Date) => call<{ ok: true; report: ReportJson }>(`/api/admin/reports?${range(from, to)}`).then((r) => r.report),
   audit: () => call<{ ok: true; entries: AuditView[] }>('/api/admin/audit').then((r) => r.entries),
   users: () => call<{ ok: true; users: AccountView[] }>('/api/admin/users').then((r) => r.users),

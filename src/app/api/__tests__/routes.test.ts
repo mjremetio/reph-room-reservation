@@ -405,8 +405,15 @@ test('GET /api/bookings is the tool list: every status, the search panel filters
   assert.ok(training.bookings.every((b: { mine: boolean; agendaType?: string }) => b.mine || b.agendaType === undefined));
   const halls = await json(await routes.bookings(get(`/api/bookings?from=2026-10-02T00:00:00%2B08:00&to=2026-10-03T00:00:00%2B08:00&agendaType=Multi-purpose`), noParams));
   assert.deepEqual(halls.bookings.map((b: { roomId: string }) => b.roomId).sort(), ['mph1', 'mph2']);
-  const tooLong = await routes.bookings(get('/api/bookings?from=2026-09-01T00:00:00%2B08:00&to=2026-10-15T00:00:00%2B08:00'), noParams);
-  assert.equal(tooLong.status, 400);
+  // Without dates: every booking, past and future (the owner's request); any range may be asked for, "to" after "from".
+  const everything = await json(await routes.bookings(get('/api/bookings'), noParams));
+  assert.ok(everything.bookings.some((b: { ticketNo: string }) => b.ticketNo === 'RM-0129901'), 'Monday');
+  assert.ok(everything.bookings.some((b: { roomId: string }) => b.roomId === 'mph1'), 'Friday');
+  assert.ok(everything.bookings.every((b: Record<string, unknown>) => b.mine || b.agenda === undefined), 'privacy kept');
+  const fromFriday = await json(await routes.bookings(get('/api/bookings?from=2026-10-02T00:00:00%2B08:00'), noParams));
+  assert.ok(fromFriday.bookings.length > 0 && fromFriday.bookings.every((b: { end: string }) => Date.parse(b.end) > Date.parse('2026-10-02T00:00:00+08:00')));
+  assert.equal((await routes.bookings(get('/api/bookings?from=2026-09-01T00:00:00%2B08:00&to=2026-10-15T00:00:00%2B08:00'), noParams)).status, 200);
+  assert.equal((await routes.bookings(get('/api/bookings?from=2026-10-15T00:00:00%2B08:00&to=2026-09-01T00:00:00%2B08:00'), noParams)).status, 400);
 });
 
 test('a weekly series books every date or none, and says which dates clash', async () => {

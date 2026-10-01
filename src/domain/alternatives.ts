@@ -11,7 +11,8 @@ export const SAME_FLOOR_BONUS = 5;
  */
 export function swapOptionsFor(blocking: Booking, rooms: Room[], bookings: Booking[], now: Date, limit = 3): Scored[] {
   const current = rooms.find((r) => r.id === blocking.roomId);
-  if (!current) return [];
+  // Admin's room block is not a booking anyone could move out of.
+  if (!current || blocking.status === 'Blocked') return [];
   const ownerNeeds: RoomRequest = {
     site: current.site,
     agendaType: blocking.agendaType,

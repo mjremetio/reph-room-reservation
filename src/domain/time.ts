@@ -2,6 +2,9 @@
  * Time helpers. Store and compare UTC Date objects; show Asia/Manila (UTC+8 all year, no daylight saving).
  */
 export const MANILA_TZ = 'Asia/Manila';
+
+/** The earliest and latest instants a Date can hold: as a range, every booking, past and future. */
+export const ALL_TIME = { start: new Date(-8.64e15), end: new Date(8.64e15) };
 const MINUTE_MS = 60 * 1000;
 const MANILA_OFFSET_MS = 8 * 60 * MINUTE_MS;
 

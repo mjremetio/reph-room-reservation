@@ -67,7 +67,8 @@ function tally<T>(items: T[], key: (item: T) => string, hours: (item: T) => numb
 
 export function buildReport(input: { bookings: Booking[]; rooms: Room[]; from: Date; to: Date; now: Date }): Report {
   const { rooms, from, to, now } = input;
-  const inRange = input.bookings.filter((b) => b.start < to && from < b.end);
+  // Admin's room blocks are not use of a room: they stay out of every figure.
+  const inRange = input.bookings.filter((b) => b.status !== 'Blocked' && b.start < to && from < b.end);
   const used = inRange.filter(usesRoom);
   const hoursIn = (b: Booking) => (Math.min(b.end.getTime(), to.getTime()) - Math.max(b.start.getTime(), from.getTime())) / HOUR_MS;
   // Released for no check-in, or due and not released yet.

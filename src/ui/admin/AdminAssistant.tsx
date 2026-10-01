@@ -16,7 +16,10 @@ import { SuggestionGroups } from '../Suggestions';
 import { useAdminAction } from './shared';
 import { ADMIN_SUGGESTIONS } from './suggestions';
 
-type AdminCard = Extract<UiEvent, { type: 'admin_action' | 'admin_change' | 'admin_swap' | 'admin_message' | 'room_schedule' }>;
+const CARD_TYPES = ['admin_action', 'admin_change', 'admin_swap', 'admin_message', 'admin_block', 'admin_bulk', 'room_schedule'] as const;
+type AdminCard = Extract<UiEvent, { type: (typeof CARD_TYPES)[number] }>;
+const isCard = (e: UiEvent): e is AdminCard => (CARD_TYPES as readonly string[]).includes(e.type);
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 type Part = { kind: 'text'; text: string } | { kind: 'card'; id: string; card: AdminCard };
 interface Msg {
   id: string;
@@ -72,15 +75,15 @@ function reducer(s: State, a: Action): State {
 const DOWN = "The assistant isn't available right now. You can still do everything from the Admin pages.";
 
 /** A card with one button that calls /api/admin/*; after it worked, it says so and can't be pressed again. */
-function ActionCard({ title, lines, button, doneText, danger, run, onDone, children }: {
+function ActionCard<T>({ title, lines, button, doneText, danger, run, onDone, children }: {
   title: string;
   lines: string[];
   button: string;
   /** What the card says after the button worked, e.g. "Approved. Tester, Charlie gets a note in Messages." */
   doneText: string;
   danger?: boolean;
-  run: () => Promise<unknown>;
-  onDone: () => void;
+  run: () => Promise<T>;
+  onDone: (result: T) => void;
   children?: ReactNode;
 }) {
   const action = useAdminAction();
@@ -102,10 +105,10 @@ function ActionCard({ title, lines, button, doneText, danger, run, onDone, child
             className={`btn btn--small ${danger ? 'btn--danger' : 'btn--primary'}`}
             disabled={action.working}
             onClick={async () => {
-              const ok = await action.run(run);
-              if (ok !== undefined) {
+              const result = await action.run(run);
+              if (result !== undefined) {
                 setDone(doneText);
-                onDone();
+                onDone(result);
               }
             }}
           >
@@ -115,6 +118,23 @@ function ActionCard({ title, lines, button, doneText, danger, run, onDone, child
         </div>
       )}
       {action.error && <div className="error-line">{action.error}</div>}
+    </div>
+  );
+}
+
+/** The bookings a block or bulk booking card would cancel. */
+function AffectedLines({ lines }: { lines: string[] }) {
+  if (lines.length === 0) return <div className="card__meta">No bookings in the way.</div>;
+  return (
+    <div className="affected">
+      <p>
+        <strong>Cancels {plural(lines.length, 'booking')}</strong> in the way; each owner gets a message:
+      </p>
+      <ul>
+        {lines.map((l) => (
+          <li key={l}>{l}</li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -160,6 +180,38 @@ function CardView({ card, onConfirmed }: { card: AdminCard; onConfirmed: (ticket
           <textarea className="card__textarea" rows={4} maxLength={2000} value={text} onChange={(e) => setText(e.target.value)} aria-label="Message" />
         </ActionCard>
       );
+    case 'admin_block': {
+      const n = card.cancel.length;
+      return (
+        <ActionCard
+          title={card.title}
+          lines={card.lines}
+          button={n ? `Block and cancel ${plural(n, 'booking')}` : 'Block'}
+          doneText={`Blocked. Nobody else can book ${card.body.roomIds.length === 1 ? 'the room' : 'these rooms'} then.${n ? ` ${plural(n, 'booking')} cancelled; each owner gets a message.` : ''}`}
+          danger={n > 0}
+          run={() => adminApi.block(card.body, card.cancel)}
+          onDone={(r) => onConfirmed(r.blocks.slice(0, 5).map((b) => b.ticketNo))}
+        >
+          <AffectedLines lines={card.affected} />
+        </ActionCard>
+      );
+    }
+    case 'admin_bulk': {
+      const n = card.cancel.length;
+      return (
+        <ActionCard
+          title={card.title}
+          lines={card.lines}
+          button={n ? `Book ${card.count} and cancel ${plural(n, 'booking')}` : `Book ${card.count}`}
+          doneText={`Booked ${plural(card.count, 'booking')} for ${card.owner}, Approved.${n ? ` ${plural(n, 'booking')} cancelled; each owner gets a message.` : ''}`}
+          danger={n > 0}
+          run={() => adminApi.bulk(card.body, card.cancel)}
+          onDone={(r) => onConfirmed(r.created.slice(0, 5).map((b) => b.ticketNo))}
+        >
+          <AffectedLines lines={card.affected} />
+        </ActionCard>
+      );
+    }
     case 'room_schedule':
       return (
         <div className="card card--admin">
@@ -224,7 +276,7 @@ export function AdminAssistant({ hidden, onHide, onStreaming, onReply }: {
         if (event === 'text') dispatch({ type: 'delta', text: (data as { delta: string }).delta });
         else if (event === 'ui') {
           const e = data as UiEvent;
-          if (e.type === 'admin_action' || e.type === 'admin_change' || e.type === 'admin_swap' || e.type === 'admin_message' || e.type === 'room_schedule') dispatch({ type: 'card', card: e });
+          if (isCard(e)) dispatch({ type: 'card', card: e });
         } else if (event === 'done') {
           finished = true;
           dispatch({ type: 'done', history: (data as { history: unknown[] }).history });
@@ -276,7 +328,7 @@ export function AdminAssistant({ hidden, onHide, onStreaming, onReply }: {
         {s.messages.length === 0 && (
           <div className="welcome">
             <h1>Manage bookings</h1>
-            <p>Ask about requests, bookings, rooms or usage. I prepare approvals, changes, swaps and messages as cards; nothing changes until you press a card&apos;s button.</p>
+            <p>Ask about requests, bookings, rooms or usage. I prepare approvals, changes, swaps, room blocks, bulk bookings and messages as cards; nothing changes until you press a card&apos;s button.</p>
             <SuggestionGroups groups={ADMIN_SUGGESTIONS} onPick={(q) => void send(q)} />
           </div>
         )}

@@ -208,3 +208,61 @@ test('an Admin change of type checks the owner again: a Training may overlap the
   await assert.rejects(gw.updateBooking(t.ticketNo, { agendaType: 'Meeting' }, admin), (e: unknown) => e instanceof ConflictError && e.kind === 'requester');
   assert.equal((await gw.updateBooking(t.ticketNo, { agenda: 'Excel basics' }, admin)).agendaType, 'Training', 'other changes still work');
 });
+
+test('Admin blocks rooms for a time: nobody can book them then; bookings already there stop it, unless Admin agreed to cancel them', async () => {
+  const gw = emptyGateway();
+  const block = { roomIds: ['snowdon', 'denali'], start: at(9), end: at(12), reason: 'Aircon maintenance' };
+  await assert.rejects(gw.blockRooms(block, alpha, []), /Admin only/);
+  const alphas = await gw.createBooking({ ...request('snowdon', alpha, 10), agendaType: 'Training', start: at(10), end: at(11) });
+  // Someone holds Snowdon then: unless Admin agreed to cancel it, nothing changes and the clash is listed.
+  await assert.rejects(gw.blockRooms(block, admin, []), (e: unknown) => e instanceof ConflictError && e.conflicts[0]?.ticketNo === alphas.ticketNo);
+  assert.equal((await gw.getBookings({ roomIds: ['denali'], from: at(0), to: at(23) })).length, 0, 'all or none');
+  // An unknown room stops it before anything changes, too.
+  await assert.rejects(gw.blockRooms({ ...block, roomIds: ['snowdon', 'atlantis'] }, admin, [alphas.ticketNo]), /Unknown room "atlantis"/);
+  assert.equal((await gw.getBooking(alphas.ticketNo))?.status, 'In Progress');
+
+  const { blocks, cancelled } = await gw.blockRooms(block, admin, [alphas.ticketNo]);
+  assert.deepEqual(blocks.map((b) => [b.roomId, b.status, b.agenda, b.owner.name]), [['snowdon', 'Blocked', 'Aircon maintenance', mark.name], ['denali', 'Blocked', 'Aircon maintenance', mark.name]]);
+  assert.deepEqual(cancelled.map((b) => b.ticketNo), [alphas.ticketNo]);
+  const gone = await gw.getBooking(alphas.ticketNo);
+  assert.deepEqual([gone?.status, gone?.adminComments], ['Cancelled', 'Cancelled by Admin: the room is blocked (Aircon maintenance).']);
+  // The block holds the room like a booking, is never released as a no-show, and Admin lifts it by cancelling.
+  await assert.rejects(gw.createBooking({ ...request('denali', bravo, 10), agendaType: 'Training', start: at(11), end: at(12) }), (e: unknown) => e instanceof ConflictError && e.kind === 'room');
+  const late = new MockGateway({ withSamples: false, now: () => at(11, 59) });
+  await late.blockRooms({ ...block, roomIds: ['elnido'] }, admin, []);
+  assert.deepEqual(await late.releaseNoShows(), []);
+  // A block is only lifted: never changed, moved, swapped, or replaced by another block or bulk booking.
+  const snowdon = (blocks[0] as { ticketNo: string }).ticketNo;
+  const bravos = await gw.createBooking({ ...request('elnido', bravo, 10), agendaType: 'Training', start: at(9), end: at(10) });
+  await assert.rejects(gw.updateBooking(snowdon, { end: at(13) }, admin), /is a room block: lift it/);
+  await assert.rejects(gw.swapRooms(snowdon, bravos.ticketNo, admin), /is a room block: lift it/);
+  await assert.rejects(gw.moveBooking(snowdon, 'elnido', admin), /is a room block: lift it/);
+  await assert.rejects(gw.blockRooms({ ...block, roomIds: ['snowdon'], start: at(11), end: at(14) }, admin, [snowdon]), /already blocks that room then \(Aircon maintenance\)\. Lift that block first/);
+  await assert.rejects(gw.bulkBook({ ...request('snowdon', mark, 10), roomIds: ['snowdon'], agendaType: 'Training', start: at(9), end: at(10) }, admin, [snowdon]), /Lift that block first/);
+  // Nobody's own bookings: not even the Admin's who made it.
+  assert.deepEqual((await gw.listMyBookings(mark.email, at(0), at(23))).map((b) => b.ticketNo), []);
+  await gw.cancelBooking((blocks[1] as { ticketNo: string }).ticketNo, admin, 'Done early');
+  await gw.createBooking({ ...request('denali', bravo, 10), agendaType: 'Training', start: at(11), end: at(12) });
+});
+
+test('Admin books several rooms at once, for every date, Approved, for a person Admin picks; the room rules still apply', async () => {
+  const gw = emptyGateway();
+  const charlie = { name: 'Tester, Charlie', email: 'charlie.tester@example.com', division: 'Learning' };
+  const bulk = { roomIds: ['amsterdam', 'capetown'], start: at(9), end: at(10), agenda: 'Sales huddle', agendaType: 'Meeting' as const, participants: 5, requester: charlie };
+  await assert.rejects(gw.bulkBook(bulk, alpha, []), /Admin only/);
+  await assert.rejects(gw.bulkBook({ ...bulk, roomIds: ['amsterdam', 'snowdon'] }, admin, []), /Snowdon can be booked for Training only, not Meeting/);
+  await assert.rejects(gw.bulkBook({ ...bulk, participants: 6 }, admin, []), /Amsterdam holds up to 5 people, not 6/);
+  const weekly = { ...bulk, recurrence: { freq: 'Weekly' as const, every: 1, days: ['Monday' as const], until: manila(2026, 10, 5, 23) } };
+  const { created, cancelled } = await gw.bulkBook(weekly, admin, []);
+  // Two rooms × two Mondays; one person holds both rooms at once (bulk).
+  assert.equal(created.length, 4);
+  assert.deepEqual(cancelled, []);
+  assert.ok(created.every((b) => b.status === 'Approved' && b.owner.email === charlie.email && b.createdBy === 'MARKJOSEPH.REMETIO'));
+  // Bookings already there stop it, unless Admin agreed to cancel each of them.
+  const first = created.filter((b) => b.start.getTime() === at(9).getTime()).map((b) => b.ticketNo);
+  await assert.rejects(gw.bulkBook({ ...bulk, agenda: 'Second huddle' }, admin, []), (e: unknown) => e instanceof ConflictError && e.conflicts.length === 2);
+  await assert.rejects(gw.bulkBook({ ...bulk, agenda: 'Second huddle' }, admin, first.slice(0, 1)), (e: unknown) => e instanceof ConflictError && e.conflicts[0]?.ticketNo === first[1]);
+  const again = await gw.bulkBook({ ...bulk, agenda: 'Second huddle' }, admin, first);
+  assert.equal(again.cancelled.length, 2);
+  assert.equal((await gw.getBooking((again.cancelled[0] as { ticketNo: string }).ticketNo))?.adminComments, 'Cancelled by Admin: the room is needed for "Second huddle".');
+});

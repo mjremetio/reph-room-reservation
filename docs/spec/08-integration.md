@@ -45,6 +45,8 @@ export interface ReservationGateway {
   updateBooking(ticketNo: string, changes: BookingChanges, by: Actor): Promise<Booking>;
   swapRooms(ticketA: string, ticketB: string, by: Actor): Promise<[Booking, Booking]>;
   updateRoom(roomId: string, changes: RoomChanges, by: Actor): Promise<Room>;
+  blockRooms(block: RoomBlock, by: Actor, cancel: readonly string[]): Promise<{ blocks: Booking[]; cancelled: Booking[] }>;
+  bulkBook(req: BulkBooking, by: Actor, cancel: readonly string[]): Promise<{ created: Booking[]; cancelled: Booking[] }>;
 }
 ```
 Error classes (same file), all extending `Error` with `name` set to the class name:
@@ -68,6 +70,10 @@ Error classes (same file), all extending `Error` with `name` set to the class na
 | `updateBooking(ticketNo, changes, by)` | Admin only; undefined fields keep their value; the room must exist and be free (not counting the booking itself) and, when the time moves, the owner must hold no other room then; Cancelled or Completed can't change. Rules are checked before by `prepareAdminChange` | `ConflictError` (`room` or `requester`), `NotAllowedError`, `NotFoundError` |
 | `swapRooms(ticketA, ticketB, by)` | Admin only; two open bookings in different rooms exchange rooms in one step, each keeping its time; each must fit the other's room against every other booking | `ConflictError`, `NotAllowedError`, `NotFoundError` |
 | `updateRoom(roomId, changes, by)` | Admin only; name, capacity, AV, self-service, notes (null clears); id, site, building, floor and kind stay | `NotAllowedError`, `NotFoundError` |
+| `blockRooms({ roomIds, start, end, reason }, by, cancel)` | Admin only; each room gets a booking with status Blocked for the time (02 F35). The bookings already there are cancelled first if they are in `cancel` (the tickets Admin saw), with "Cancelled by Admin: the room is blocked (<reason>)."; any other stops it. All or none | `ConflictError` (the bookings not agreed to), `NotAllowedError` ("Admin only.", end before start, another block in the way: "RM-… already blocks that room then (<reason>). Lift that block first."), `NotFoundError` |
+| `bulkBook({ roomIds, …NewBooking }, by, cancel)` | Admin only; every room on every date of the recurrence, Approved, for `requester`; each room must take the type and the group (`roomIssues`); one person may hold them all. Bookings in the way as for `blockRooms` ("Cancelled by Admin: the room is needed for \"<agenda>\"."). All or none | as `blockRooms` |
+
+A room block is only lifted: `updateBooking`, `swapRooms` and `moveBooking` refuse it with `blockIsFixed` ("RM-… is a room block: lift it, then block the room again for the new time.").
 
 In the real tool each Admin method must go through the tool's own Admin functions (its approval, .ics updates and reminders) [OPEN: RULES questions 2, 6 and 19]; until that is confirmed a read-only or requests-only adapter leaves them out and the Admin pages show the error.
 

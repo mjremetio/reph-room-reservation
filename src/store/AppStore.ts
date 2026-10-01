@@ -37,6 +37,8 @@ export type AuditAction =
   | 'booking.reject'
   | 'booking.update'
   | 'booking.swap'
+  | 'booking.block'
+  | 'booking.unblock'
   | 'user.create'
   | 'user.update'
   | 'user.reset'

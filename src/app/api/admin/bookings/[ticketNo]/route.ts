@@ -1,6 +1,6 @@
 /**
  * Admin acts on one booking (docs/spec/04-api.md, Admin; flows F30):
- *   POST  { action: approve | reject | cancel | checkin, comment? } – reject needs a reason
+ *   POST  { action: approve | reject | cancel | checkin, comment? } – reject needs a reason; cancel lifts a room block
  *   PATCH { roomId?, start?, end?, participants?, agenda?, agendaType?, priority? } – checked by prepareAdminChange
  * Every change is audited and leaves an automatic note in the booking's thread for its owner.
  */
@@ -38,8 +38,14 @@ export const POST = shared(async function post(request: Request, { params }: Par
       return Response.json({ ok: true, booking: adminBooking(booking, admin.email) });
     }
     if (a.action === 'cancel') {
+      const block = (await gw.getBooking(ticketNo))?.status === 'Blocked';
       await gw.cancelBooking(ticketNo, admin, a.comment);
       const booking = await gw.getBooking(ticketNo);
+      if (block) {
+        // The room is free again. A block is nobody's booking, so no note goes into a thread.
+        audit(admin, 'booking.unblock', ticketNo, withNote(`${booking ? bookingLabel(booking, await gw.listRooms()) : ticketNo} · ${booking?.agenda ?? ''}`, a.comment));
+        return Response.json({ ok: true, booking: booking && adminBooking(booking, admin.email) });
+      }
       audit(admin, 'booking.cancel', ticketNo, withNote('by Admin.', a.comment));
       if (booking) adminNote(getStore(), booking, admin, withNote('Admin cancelled this booking.', a.comment), t);
       return Response.json({ ok: true, booking: booking && adminBooking(booking, admin.email) });

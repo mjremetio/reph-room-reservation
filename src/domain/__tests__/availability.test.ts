@@ -107,3 +107,10 @@ test('nearest free slots skip booked times and never overlap each other', () => 
   for (const s of slots) assert.equal(conflictsFor('centralpark', s, [alpha], now).length, 0);
   assert.equal(overlaps(slots[0]!, slots[1]!), false);
 });
+
+test("Admin's room block holds the room like a booking, but is nobody's own booking (one room per person)", () => {
+  const want = { start: manila(2026, 9, 28, 15), end: manila(2026, 9, 28, 16), agendaType: 'Meeting' as const };
+  const block = booking('coron', want.start, want.end, { ticketNo: 'RM-5', status: 'Blocked', agenda: 'Aircon maintenance', participants: 0 });
+  assert.deepEqual(conflictsFor('coron', want, [block], now).map((b) => b.ticketNo), ['RM-5']);
+  assert.deepEqual(ownConflicts(owner.email, want, [block], now), [], 'the Admin who blocked it may still book a room then');
+});

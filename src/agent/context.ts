@@ -30,7 +30,37 @@ export type UiEvent =
   | { type: 'admin_action'; action: 'approve' | 'reject' | 'cancel' | 'checkin'; ticketNo: string; owner: string; summary: string; comment?: string }
   | { type: 'admin_change'; ticketNo: string; owner: string; change: string; summary: string; body: AdminChangeJson }
   | { type: 'admin_swap'; a: string; b: string; summary: string[] }
-  | { type: 'admin_message'; ticketNo: string; owner: string; summary: string; text: string };
+  | { type: 'admin_message'; ticketNo: string; owner: string; summary: string; text: string }
+  /**
+   * A room block or bulk booking: `affected` describes the bookings it would cancel, `cancel` holds their tickets. The
+   * button sends `body` with `cancel`, so any booking made after the card was shown stops it instead of being cancelled.
+   */
+  | { type: 'admin_block'; title: string; lines: string[]; affected: string[]; cancel: string[]; body: AdminBlockJson }
+  | { type: 'admin_bulk'; title: string; lines: string[]; affected: string[]; cancel: string[]; owner: string; count: number; body: AdminBulkJson };
+
+/** The body of POST /api/admin/blocks that an admin_block card sends (times as ISO). */
+export interface AdminBlockJson {
+  roomIds: string[];
+  start: string;
+  end: string;
+  reason: string;
+}
+
+/** The body of POST /api/admin/bookings/bulk that an admin_bulk card sends (times as ISO). */
+export interface AdminBulkJson {
+  roomIds: string[];
+  agendaType: AgendaType;
+  agenda: string;
+  start: string;
+  end: string;
+  participants: number;
+  priority?: Priority;
+  trainingType?: TrainingType;
+  specialInstructions?: string;
+  recurrence?: RecurrenceJson;
+  /** Who it is for; none = the Admin. Goes to the Admin's browser only, never to the model. */
+  ownerEmail?: string;
+}
 
 /** The body of PATCH /api/admin/bookings/{ticketNo} that an admin_change card sends (times as ISO). */
 export interface AdminChangeJson {
@@ -106,4 +136,6 @@ export interface AssistantContext {
   emit: (event: UiEvent) => void;
   /** How long prepared proposals wait for Confirm: the app's cards by default, longer for MCP confirm links. */
   proposalHoldMinutes?: number;
+  /** Admin assistant: the app's active accounts, whom Admin may book for besides the tool's employee list. */
+  people?: Requestor[];
 }

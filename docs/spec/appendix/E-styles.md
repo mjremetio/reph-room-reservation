@@ -2989,6 +2989,10 @@ textarea {
   background: var(--plate);
   color: var(--muted);
 }
+.dt-status--blocked {
+  background: var(--ink);
+  color: var(--surface);
+}
 .admin-warn {
   color: var(--orange);
   font-weight: 700;
@@ -3092,6 +3096,86 @@ textarea {
   display: grid;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+/* ---------- Block rooms and Bulk booking (AdminBlockBulk) ---------- */
+.admin-bulk {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 16px 24px;
+  align-items: start;
+}
+.admin-bulk > .affected,
+.admin-bulk > .banner,
+.admin-bulk > .btn-row {
+  grid-column: 1 / -1;
+}
+.room-picker {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 8px 12px 12px;
+  border: 1px solid var(--plate);
+  border-radius: var(--radius-card);
+  max-height: min(60dvh, 560px);
+  overflow: auto;
+}
+.room-picker legend {
+  padding: 0 4px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.room-picker__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--plate);
+}
+.room-picker__room {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 14px;
+  cursor: pointer;
+}
+.room-picker__room input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+.room-picker__room.is-off {
+  color: var(--muted);
+  cursor: default;
+}
+.room-picker__room .dt-muted {
+  font-size: 12px;
+  text-align: right;
+}
+/* The bookings a block or bulk booking would cancel (also on the Admin assistant's cards). */
+.affected {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-card);
+  background: var(--red-tint);
+  color: #8a1f17;
+  font-size: 13px;
+}
+.affected--none {
+  background: var(--green-tint);
+  color: #0f5a2b;
+}
+.affected p {
+  margin: 0;
+}
+.affected ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  max-height: 220px;
+  overflow: auto;
 }
 
 /* ---------- Messages (Admin inbox) ---------- */
@@ -3385,8 +3469,12 @@ textarea {
     padding: 16px 16px 40px;
   }
   .admin-inbox,
-  .admin-change {
+  .admin-change,
+  .admin-bulk {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .room-picker {
+    max-height: none;
   }
   .chart-grid {
     grid-template-columns: minmax(0, 1fr);

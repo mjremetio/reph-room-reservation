@@ -4,6 +4,7 @@
  * One booking for Admin (docs/spec/06-ui.md, S17 Admin booking): every field of the tool and the owner's e-mail;
  * Approve, Turn down (with a reason), Change, Swap rooms, Cancel and Check in; and the booking's thread with its
  * owner. Every action goes through /api/admin/* (the server checks the rules again) and leaves a note for the owner.
+ * A room block (status Blocked) can only be lifted: it has no owner to message and is never changed or swapped.
  */
 import { useState, type ReactNode } from 'react';
 import { describeRecurrence, fromRecurrenceJson } from '../../domain/recurrence';
@@ -17,6 +18,8 @@ import { fromLocalInput, StatusChip, toLocalInput, useAdminAction, useServerNow 
 
 type Mode = 'view' | 'reject' | 'cancel' | 'change' | 'swap';
 const open = (b: AdminBooking) => b.status !== 'Cancelled' && b.status !== 'Completed';
+/** Open and not a room block: can be changed or swapped. */
+const editable = (b: AdminBooking) => open(b) && b.status !== 'Blocked';
 const overlaps = (a: AdminBooking, b: AdminBooking) => Date.parse(a.start) < Date.parse(b.end) && Date.parse(b.start) < Date.parse(a.end);
 
 export function AdminBookingSheet({
@@ -38,6 +41,7 @@ export function AdminBookingSheet({
   const [done, setDone] = useState<string | null>(null);
   const action = useAdminAction();
   const room = rooms.find((r) => r.id === b.roomId);
+  const block = b.status === 'Blocked';
   const roomName = (id: string) => {
     const r = rooms.find((x) => x.id === id);
     return r ? `${r.name}, ${r.floor}` : id;
@@ -49,33 +53,45 @@ export function AdminBookingSheet({
     setB(res.booking ?? { ...b, status: 'Cancelled' });
     setMode('view');
     setComment('');
-    setDone({ approve: 'Approved.', reject: 'Turned down.', cancel: 'Cancelled.', checkin: 'Checked in.' }[kind] + ' The owner gets a note in Messages.');
+    setDone(block ? 'Block lifted. The room can be booked again.' : { approve: 'Approved.', reject: 'Turned down.', cancel: 'Cancelled.', checkin: 'Checked in.' }[kind] + ' The owner gets a note in Messages.');
   };
 
   const w = checkInWindow({ start: new Date(b.start) });
   const t = now();
   const canCheckIn = (b.status === 'Approved' || b.status === 'In Progress') && t >= w.start && t < w.end;
   const dash = (v: ReactNode) => v || <span className="dt-muted">—</span>;
-  const rows: Array<[string, ReactNode]> = [
-    ['Name of requestor', b.owner],
-    ['E-mail', dash(b.ownerEmail)],
-    ['Division', dash(b.division)],
-    ['Agenda', b.agenda],
-    ['Type of agenda', b.agendaType],
-    ['Priority', dash(b.priority)],
-    ['Type of training', dash(b.trainingType)],
-    ['Number of participants', `${b.participants}${room?.capacity ? ` (room seats ${room.capacity})` : ''}`],
-    ['Room', roomName(b.roomId)],
-    ['Starts at', fmtTool(b.start)],
-    ['Ends at', fmtTool(b.end)],
-    ['Recurrence', dash(b.recurrence && describeRecurrence(fromRecurrenceJson(b.recurrence)))],
-    ['Special instructions', dash(b.specialInstructions)],
-    ['Hardware requirements', dash(b.hardwareRequirements?.join(', '))],
-    ['Admin comments', dash(b.adminComments)],
-    ['Created by', dash(b.createdBy)],
-    ['Created date', dash(b.createdAt && fmtToolDate(b.createdAt))],
-    ['Modified by', dash(b.modifiedBy)],
-  ];
+  const rows: Array<[string, ReactNode]> = block
+    ? [
+        ['Blocked by', b.owner],
+        ['Reason', b.agenda],
+        ['Room', roomName(b.roomId)],
+        ['Starts at', fmtTool(b.start)],
+        ['Ends at', fmtTool(b.end)],
+        ['Admin comments', dash(b.adminComments)],
+        ['Created by', dash(b.createdBy)],
+        ['Created date', dash(b.createdAt && fmtToolDate(b.createdAt))],
+        ['Modified by', dash(b.modifiedBy)],
+      ]
+    : [
+        ['Name of requestor', b.owner],
+        ['E-mail', dash(b.ownerEmail)],
+        ['Division', dash(b.division)],
+        ['Agenda', b.agenda],
+        ['Type of agenda', b.agendaType],
+        ['Priority', dash(b.priority)],
+        ['Type of training', dash(b.trainingType)],
+        ['Number of participants', `${b.participants}${room?.capacity ? ` (room seats ${room.capacity})` : ''}`],
+        ['Room', roomName(b.roomId)],
+        ['Starts at', fmtTool(b.start)],
+        ['Ends at', fmtTool(b.end)],
+        ['Recurrence', dash(b.recurrence && describeRecurrence(fromRecurrenceJson(b.recurrence)))],
+        ['Special instructions', dash(b.specialInstructions)],
+        ['Hardware requirements', dash(b.hardwareRequirements?.join(', '))],
+        ['Admin comments', dash(b.adminComments)],
+        ['Created by', dash(b.createdBy)],
+        ['Created date', dash(b.createdAt && fmtToolDate(b.createdAt))],
+        ['Modified by', dash(b.modifiedBy)],
+      ];
 
   return (
     <Sheet title={b.ticketNo} subtitle={<>{fmtWhen(b.start, b.end)} · <StatusChip status={b.status} /></>} onClose={onClose} wide>
@@ -104,7 +120,7 @@ export function AdminBookingSheet({
                   </button>
                 </>
               )}
-              {open(b) && (
+              {editable(b) && (
                 <>
                   <button className="btn btn--secondary btn--small" disabled={action.working} onClick={() => setMode('change')}>
                     Change…
@@ -121,7 +137,7 @@ export function AdminBookingSheet({
               )}
               {open(b) && b.status !== 'Checked-In' && (
                 <button className="btn btn--danger btn--small" disabled={action.working} onClick={() => setMode('cancel')}>
-                  Cancel…
+                  {block ? 'Lift block…' : 'Cancel…'}
                 </button>
               )}
             </div>
@@ -135,12 +151,12 @@ export function AdminBookingSheet({
               }}
             >
               <label>
-                {mode === 'reject' ? 'Why is it turned down? (the owner sees this)' : 'Reason (optional, the owner sees this)'}
+                {mode === 'reject' ? 'Why is it turned down? (the owner sees this)' : block ? 'Note (optional, for the log)' : 'Reason (optional, the owner sees this)'}
                 <textarea rows={2} maxLength={500} autoFocus value={comment} onChange={(e) => setComment(e.target.value)} />
               </label>
               <div className="btn-row">
                 <button className="btn btn--danger btn--small" type="submit" disabled={action.working || (mode === 'reject' && !comment.trim())}>
-                  {mode === 'reject' ? 'Turn down' : 'Cancel booking'}
+                  {mode === 'reject' ? 'Turn down' : block ? 'Lift block' : 'Cancel booking'}
                 </button>
                 <button className="btn btn--secondary btn--small" type="button" onClick={() => setMode('view')}>
                   Back
@@ -167,7 +183,7 @@ export function AdminBookingSheet({
           {mode === 'swap' && (
             <SwapPicker
               b={b}
-              candidates={others.filter((o) => o.ticketNo !== b.ticketNo && open(o) && o.roomId !== b.roomId)}
+              candidates={others.filter((o) => o.ticketNo !== b.ticketNo && editable(o) && o.roomId !== b.roomId)}
               roomName={roomName}
               busy={action.working}
               onCancel={() => setMode('view')}
@@ -191,8 +207,17 @@ export function AdminBookingSheet({
           </dl>
         </section>
         <section>
-          <h3 className="section-title">Messages with {b.owner}</h3>
-          <Thread ticketNo={b.ticketNo} admin />
+          {block ? (
+            <>
+              <h3 className="section-title">Room block</h3>
+              <p className="card__note">People see “Blocked by Admin” on the map and can&apos;t book the room then. Lifting the block frees the room at once. To change it, lift it and block again.</p>
+            </>
+          ) : (
+            <>
+              <h3 className="section-title">Messages with {b.owner}</h3>
+              <Thread ticketNo={b.ticketNo} admin />
+            </>
+          )}
         </section>
       </div>
     </Sheet>

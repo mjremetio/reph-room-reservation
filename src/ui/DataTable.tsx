@@ -353,18 +353,19 @@ function BookingActions({ b, room, onDetails }: { b: PublicBooking; room: RoomVi
   );
 }
 
-const BOOKING_STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Cancelled', 'Completed'] as const;
+const BOOKING_STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Cancelled', 'Completed', 'Blocked'] as const;
 const dayStart = (ymd: string) => new Date(`${ymd}T00:00:00+08:00`);
 const addDaysYmd = (ymd: string, n: number) => fmtToolDate(addMinutes(dayStart(ymd), n * 24 * 60));
 
 /**
  * The Room Reservation Tool's reservation list (GET /api/bookings): its search panel (reservation date from–to,
  * type of agenda, site, building, room, employee name) plus status, and its columns in its order.
- * Dates follow the map's day until you change them.
+ * Every booking, past and future, until a date is picked.
  */
 function BookingsTable() {
   const map = useMapData();
-  const [range, setRange] = useState<{ from: string; to: string } | null>(null);
+  // '' = open on that side (the owner's request, 1 Oct 2026).
+  const [range, setRange] = useState({ from: '', to: '' });
   const [agendaType, setAgendaType] = useState<AgendaType | ''>('');
   const [roomId, setRoomId] = useState('');
   const [employee, setEmployee] = useState('');
@@ -375,13 +376,11 @@ function BookingsTable() {
   const [sort, setSort] = useState<Sort<BookingKey>>({ key: 'start', dir: 'asc' });
   const [details, setDetails] = useState<PublicBooking | null>(null);
 
-  const mapDay = fmtToolDate(map.slot.start);
-  const from = range?.from ?? mapDay;
-  const to = range?.to ?? mapDay;
+  const { from, to } = range;
   const employeeQ = useDebounced(employee.trim());
   const filter: BookingsFilter = {
-    from: dayStart(from),
-    to: dayStart(addDaysYmd(to, 1)),
+    ...(from ? { from: dayStart(from) } : {}),
+    ...(to ? { to: dayStart(addDaysYmd(to, 1)) } : {}),
     site: 'Manila',
     building: 'Bldg. H',
     ...(agendaType ? { agendaType } : {}),
@@ -431,14 +430,11 @@ function BookingsTable() {
     });
 
   const pager = usePage(filtered, JSON.stringify([from, to, agendaType, roomId, employeeQ, status, q, mineOnly, atSlot, sort]));
-  const setFrom = (v: string) => {
-    if (!v) return;
-    const cap = addDaysYmd(v, 30); // the API allows 31 days
-    setRange({ from: v, to: to < v ? v : to > cap ? cap : to });
-  };
-  const setTo = (v: string) => v && setRange({ from, to: v < from ? from : v });
+  // Either date may be cleared; "to" stays on or after "from".
+  const setFrom = (v: string) => setRange({ from: v, to: v && to && to < v ? v : to });
+  const setTo = (v: string) => setRange({ from, to: v && from && v < from ? from : v });
   const clear = () => {
-    setRange(null);
+    setRange({ from: '', to: '' });
     setAgendaType('');
     setRoomId('');
     setEmployee('');
@@ -451,7 +447,7 @@ function BookingsTable() {
   // created/modified by are filled only for your own bookings (privacy rule 5).
   const exportBookings = () =>
     exportCsv(
-      `bookings-${from}${to !== from ? `-to-${to}` : ''}.csv`,
+      `bookings-${!from && !to ? 'all' : from === to ? from : `${from || 'start'}-to-${to || 'end'}`}.csv`,
       ['Ticket No', 'Agenda', 'Employee', 'Division', 'Category', 'Building', 'Room', 'Starts At', 'Ends At', 'Created By', 'Created Date', 'Status', 'Participants', 'Priority', 'Type of Training', 'Special Instructions', 'Hardware Requirements', 'Recurrence', 'Admin Comments', 'Modified By'],
       filtered.map((b) => [
         b.ticketNo,
@@ -486,7 +482,7 @@ function BookingsTable() {
         </label>
         <label className="dt-field">
           <span>to</span>
-          <input type="date" aria-label="Reservation date to" value={to} min={from} max={addDaysYmd(from, 30)} onChange={(e) => setTo(e.target.value)} />
+          <input type="date" aria-label="Reservation date to" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} />
         </label>
         <select aria-label="Type of agenda" value={agendaType} onChange={(e) => setAgendaType(e.target.value as AgendaType | '')}>
           <option value="">Any type of agenda</option>

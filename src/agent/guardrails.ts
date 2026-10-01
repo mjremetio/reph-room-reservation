@@ -13,11 +13,11 @@ export const OFF_TOPIC_REPLY =
   'I can only help with rooms at REPH: finding, booking, checking in to or cancelling a room, and questions about the Room Reservation Guidelines. Try "Room for 5 today from 3 to 4 PM".';
 
 export const ADMIN_OFF_TOPIC_REPLY =
-  'I can only help Admin with room reservations at REPH: requests waiting for approval, bookings, changes and swaps, messages to owners, room schedules and usage reports. Try "What needs approval today?".';
+  'I can only help Admin with room reservations at REPH: requests waiting for approval, bookings, changes and swaps, room blocks and bulk bookings, messages to owners, room schedules and usage reports. Try "What needs approval today?".';
 
 /** Admin talk that is always in scope for the Admin assistant, on top of BOOKING_WORDS. */
 export const ADMIN_WORDS =
-  /\b(approv(e|ed|al|als)|reject(ed)?|turn(ed)? down|decline|requests?|pending|waiting|queue|reports?|usage|utili[sz]ation|no[- ]?shows?|busiest|least|stats?|statistics|trends?|owners?|message|reply|remind|tickets?|rm-\d+|move|extend|shorten|change|division|requesters?)\b/i;
+  /\b(approv(e|ed|al|als)|reject(ed)?|turn(ed)? down|decline|requests?|pending|waiting|queue|reports?|usage|utili[sz]ation|no[- ]?shows?|busiest|least|stats?|statistics|trends?|owners?|message|reply|remind|tickets?|rm-\d+|move|extend|shorten|change|division|requesters?|(un)?block(s|ed|ing)?|bulk)\b/i;
 
 const BOOKING_WORDS =
   /\b(rooms?|book(ing|ed)?|reserv(e|ation)|cancel|check(ed|ing)?[- ]?in|meeting|training|workshop|town ?hall|hall|mph|huddle|floor|2f|3f|seats?|people|pax|participants|today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|morning|afternoon|noon|agenda|swap|free|available|vc|byod|video|call|teams|laptop|screen|display|monitor|hdmi|dock|panel|projector|speaker|mic|camera|chairs?|tables?|sound|catering|hardware|servicenow|non-solus|admin|visitor office|lactation|pump(ing)?|breast ?(milk|feeding)|nursing|pantry|guidelines?|outlook|\.ics|calendar|requestor|my name|bldg|manila|iloilo|shift)\b/i;

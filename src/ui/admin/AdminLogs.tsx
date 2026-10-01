@@ -17,6 +17,8 @@ export const ACTION_WORDS: Record<string, string> = {
   'session.password': 'Changed password',
   'booking.create': 'Booked',
   'booking.cancel': 'Cancelled',
+  'booking.block': 'Blocked room',
+  'booking.unblock': 'Lifted block',
   'booking.checkin': 'Checked in',
   'booking.release': 'Released (no check-in)',
   'booking.approve': 'Approved',

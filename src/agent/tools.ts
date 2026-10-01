@@ -27,7 +27,7 @@ import { mailtoLink, teamsChatLink } from './links';
 type Ctx = RunContext<AssistantContext>;
 
 /** The tool's flat recurrence arguments (strict function calling) as the domain's Recurrence. */
-function toRecurrence(r: {
+export function toRecurrence(r: {
   freq: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
   every: number;
   days: Weekday[] | null;
@@ -48,6 +48,17 @@ function toRecurrence(r: {
 const AGENDA_TYPES = ['Meeting', 'Training', 'Pantry', 'Lactation Room', 'Multi-purpose'] as const;
 const isoTime = () => z.string().describe('ISO 8601 date and time with the +08:00 offset, e.g. 2026-09-28T15:00:00+08:00');
 
+/** A repeat as the model passes it (toRecurrence reads it). */
+export const recurrenceArgs = z.object({
+  freq: z.enum(['Daily', 'Weekly', 'Monthly', 'Yearly']),
+  every: z.number().int().min(1).describe('Every N days/weeks/months/years; usually 1'),
+  days: z.array(z.enum(WEEKDAYS)).nullable().describe('Weekly only: the weekdays'),
+  month_day: z.number().int().min(1).max(31).nullable().describe('Monthly on a day number, e.g. 15'),
+  month_week: z.enum(WEEK_OF_MONTH).nullable().describe('Monthly on e.g. the Third Thursday: the week'),
+  month_weekday: z.enum(WEEKDAYS).nullable().describe('Monthly on e.g. the Third Thursday: the weekday'),
+  until: isoTime().describe('Last date of the series (any time on that day)'),
+});
+
 function contextOf(rc?: Ctx): AssistantContext {
   if (!rc) throw new Error('The room assistant must run with an AssistantContext.');
   return rc.context;
@@ -60,17 +71,21 @@ function parseTime(value: string): Date {
 }
 
 const label = (r: Room) => `${r.name}, ${r.floor}`;
+/** Admin's room block has nobody to ask for a swap. */
+const BLOCKED = 'Admin blocked this room then, so it cannot be swapped and there is nobody to message. Offer another room or time.';
 const json = (value: unknown) => JSON.stringify(value);
 
 /** What the model may know about someone else's booking: name, division, time, group size and status only. */
 function otherBooking(b: Booking, rooms: Map<string, Room>) {
   const room = rooms.get(b.roomId);
+  // Admin's room block (status Blocked): Admin closed the room then; nobody to ask for a swap.
+  const block = b.status === 'Blocked';
   return {
     ticket_no: b.ticketNo,
     room: room ? label(room) : b.roomId,
     when: formatRange(b.start, b.end),
-    owner: b.owner.name,
-    division: b.owner.division ?? null,
+    owner: block ? 'Admin (room blocked)' : b.owner.name,
+    division: block ? null : (b.owner.division ?? null),
     participants: b.participants,
     status: b.status,
   };
@@ -203,18 +218,7 @@ export const proposeBooking = tool({
     training_type: z.enum(['On-Site', 'Virtual']).nullable().describe('Type of training, for Training only; null = On-Site. Ignored for other agenda types.'),
     special_instructions: z.string().nullable().describe('Anything the user asked to note for Admin; null if none'),
     hardware_requirements: z.array(z.enum(HARDWARE_OPTIONS)).nullable().describe('Extra hardware from the form list; null if none. Remind the user to file it in ServiceNow.'),
-    recurrence: z
-      .object({
-        freq: z.enum(['Daily', 'Weekly', 'Monthly', 'Yearly']),
-        every: z.number().int().min(1).describe('Every N days/weeks/months/years; usually 1'),
-        days: z.array(z.enum(WEEKDAYS)).nullable().describe('Weekly only: the weekdays'),
-        month_day: z.number().int().min(1).max(31).nullable().describe('Monthly on a day number, e.g. 15'),
-        month_week: z.enum(WEEK_OF_MONTH).nullable().describe('Monthly on e.g. the Third Thursday: the week'),
-        month_weekday: z.enum(WEEKDAYS).nullable().describe('Monthly on e.g. the Third Thursday: the weekday'),
-        until: isoTime().describe('Last date of the series (any time on that day)'),
-      })
-      .nullable()
-      .describe('Only when the user asks for a repeating booking; null otherwise'),
+    recurrence: recurrenceArgs.nullable().describe('Only when the user asks for a repeating booking; null otherwise'),
   }),
   async execute(args, rc?: Ctx) {
     const ctx = contextOf(rc);
@@ -323,6 +327,7 @@ export const findSwapOptions = tool({
     const gw = getGateway();
     const blocking = await gw.getBooking(args.ticket_no);
     if (!blocking) return json({ ok: false, problem: 'Booking not found.' });
+    if (blocking.status === 'Blocked') return json({ ok: false, problem: BLOCKED });
     const rooms = await gw.listRooms();
     const byId = new Map(rooms.map((r) => [r.id, r] as const));
     const bookings = await gw.getBookings({ from: blocking.start, to: blocking.end });
@@ -346,6 +351,7 @@ export const draftOwnerMessage = tool({
   async execute(args, rc?: Ctx) {
     const ctx = contextOf(rc);
     const b = await getGateway().getBooking(args.ticket_no);
+    if (b?.status === 'Blocked') return json({ ok: false, problem: BLOCKED });
     if (!b?.owner.email) return json({ ok: false, problem: 'There are no contact details for this booking owner.' });
     const link = args.channel === 'teams' ? teamsChatLink(b.owner.email, args.message) : mailtoLink(b.owner.email, 'About your room booking', args.message);
     ctx.emit({ type: 'draft_message', to: b.owner.name, channel: args.channel, text: args.message, link });

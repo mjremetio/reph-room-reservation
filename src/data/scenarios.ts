@@ -39,7 +39,7 @@ interface RawScenario {
   }>;
 }
 
-const STATUSES: readonly BookingStatus[] = ['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled'];
+const STATUSES: readonly BookingStatus[] = ['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled', 'Blocked'];
 const AGENDA_TYPES: readonly AgendaType[] = ['Meeting', 'Training', 'Pantry', 'Lactation Room', 'Multi-purpose'];
 
 function toDate(value: string, where: string): Date {

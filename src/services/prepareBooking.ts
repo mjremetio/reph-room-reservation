@@ -69,7 +69,7 @@ export async function prepareBooking(
   const bookings = await gw.getBookings({ roomIds: [room.id], from: (dates[0] as Interval).start, to: last.end });
   const clashes = dates.flatMap((d) => {
     const a = availabilityFor(room.id, d, bookings, now);
-    return a.kind === 'available' ? [] : [`${dateLabel(d.start)}: taken by ${a.conflicts.map((b) => b.owner.name).join(', ')}`];
+    return a.kind === 'available' ? [] : [`${dateLabel(d.start)}: taken by ${a.conflicts.map((b) => (b.status === 'Blocked' ? 'Admin (room blocked)' : b.owner.name)).join(', ')}`];
   });
   if (clashes.length > 0) {
     const problems = draft.recurrence ? [`${room.name} is not free on ${clashes.length} of ${dates.length} dates.`, ...clashes.slice(0, 5)] : [`${room.name} is no longer free for that whole time.`];

@@ -24,6 +24,7 @@ export function streamAgent(opts: {
   history: Array<Record<string, unknown>>;
   /** Notes from the app (never from client text) placed before the user's message. */
   notes?: AgentInputItem[];
+  people?: AssistantContext['people'];
   unavailable: string;
   offTopicReply: string;
 }): Response {
@@ -43,7 +44,7 @@ export function streamAgent(opts: {
           open = false; // the browser went away
         }
       };
-      const context: AssistantContext = { user, now: now(), defaultSite: 'Manila', emit: (e: UiEvent) => send('ui', e) };
+      const context: AssistantContext = { user, now: now(), defaultSite: 'Manila', emit: (e: UiEvent) => send('ui', e), ...(opts.people ? { people: opts.people } : {}) };
       const tools: string[] = [];
       try {
         const history = trimHistory(opts.history) as unknown as AgentInputItem[];

@@ -53,6 +53,7 @@ export const STATUS_WORDS: Record<string, string> = {
   Cancelled: 'Cancelled',
   Completed: 'Completed',
   Held: 'Held',
+  Blocked: 'Blocked by Admin',
 };
 
 /** Status in a few words for list rows ("In Progress" → "Requested"). */

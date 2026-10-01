@@ -4,18 +4,21 @@ import { expandRecurrence } from '../domain/recurrence';
 import { bookable } from '../domain/ranking';
 import { checkInWindow, initialStatus, placementChanged, roomIssues, RULES, shouldAutoRelease } from '../domain/rules';
 import { addMinutes, formatManila, manilaStartOfDay } from '../domain/time';
-import type { AgendaType, Booking, Person, Room, Site } from '../domain/types';
+import type { AgendaType, Booking, Interval, Person, Room, Site } from '../domain/types';
 import { ROOMS } from '../data/rooms';
 import type { Scenario } from '../data/scenarios';
 import {
+  blockIsFixed,
   ConflictError,
   NotAllowedError,
   NotFoundError,
   type Actor,
   type BookingChanges,
+  type BulkBooking,
   type NewBooking,
   type ReservationGateway,
   type Requestor,
+  type RoomBlock,
   type RoomChanges,
 } from './ReservationGateway';
 
@@ -103,8 +106,9 @@ export class MockGateway implements ReservationGateway {
   }
 
   async listMyBookings(email: string, from: Date, to?: Date): Promise<Booking[]> {
+    // Admin's room blocks are on the Admin pages, not in anyone's own bookings.
     return this.bookings
-      .filter((b) => sameEmail(b.owner.email, email) && (!to || b.start < to) && from < b.end)
+      .filter((b) => b.status !== 'Blocked' && sameEmail(b.owner.email, email) && (!to || b.start < to) && from < b.end)
       .sort((x, y) => x.start.getTime() - y.start.getTime())
       .map(clone);
   }
@@ -182,6 +186,7 @@ export class MockGateway implements ReservationGateway {
   async moveBooking(ticketNo: string, toRoomId: string, _by: Actor): Promise<Booking> {
     // In the real tool the owner must agree (or make the change). The mock trusts the caller.
     const b = this.mustFind(ticketNo);
+    if (b.status === 'Blocked') throw new NotAllowedError(blockIsFixed(b));
     if (!this.rooms.some((r) => r.id === toRoomId)) throw new NotFoundError(`Unknown room "${toRoomId}".`);
     const others = this.bookings.filter((x) => x !== b);
     const conflicts = conflictsFor(toRoomId, b, others, this.now());
@@ -268,6 +273,93 @@ export class MockGateway implements ReservationGateway {
     return { ...r };
   }
 
+  async blockRooms(block: RoomBlock, by: Actor, cancel: readonly string[]): Promise<{ blocks: Booking[]; cancelled: Booking[] }> {
+    assertAdmin(by);
+    if (block.end.getTime() <= block.start.getTime()) throw new NotAllowedError('The end must be after the start.');
+    const rooms = this.mustRooms(block.roomIds);
+    const slots = rooms.map((room) => ({ roomId: room.id, start: block.start, end: block.end }));
+    const cancelled = this.clearSlots(slots, by, cancel, `Cancelled by Admin: the room is blocked (${block.reason}).`);
+    const blocks: Booking[] = rooms.map((room) => ({
+      ticketNo: `RM-0${this.nextTicket++}`,
+      roomId: room.id,
+      start: new Date(block.start.getTime()),
+      end: new Date(block.end.getTime()),
+      status: 'Blocked',
+      agenda: block.reason,
+      agendaType: room.agendas[0] ?? 'Meeting',
+      participants: 0,
+      owner: personOf(by),
+      priority: 'Normal',
+      createdBy: by.login ?? toolLogin(by),
+      createdAt: this.now(),
+    }));
+    this.bookings.push(...blocks);
+    return { blocks: blocks.map(clone), cancelled: cancelled.map(clone) };
+  }
+
+  async bulkBook(req: BulkBooking, by: Actor, cancel: readonly string[]): Promise<{ created: Booking[]; cancelled: Booking[] }> {
+    assertAdmin(by);
+    const rooms = this.mustRooms(req.roomIds);
+    for (const room of rooms) {
+      const [wrong] = roomIssues(room, req.agendaType, req.participants);
+      if (wrong) throw new NotAllowedError(wrong.message);
+    }
+    const dates = req.recurrence ? expandRecurrence(req, req.recurrence) : [{ start: req.start, end: req.end }];
+    const slots = rooms.flatMap((room) => dates.map((d) => ({ roomId: room.id, start: d.start, end: d.end })));
+    const cancelled = this.clearSlots(slots, by, cancel, `Cancelled by Admin: the room is needed for "${req.agenda}".`);
+    const trainingType = req.agendaType === 'Training' ? (req.trainingType ?? 'On-Site') : undefined;
+    const created: Booking[] = slots.map((s) => ({
+      ticketNo: `RM-0${this.nextTicket++}`,
+      roomId: s.roomId,
+      start: new Date(s.start.getTime()),
+      end: new Date(s.end.getTime()),
+      status: 'Approved', // Admin made them: nothing waits for Admin
+      agenda: req.agenda,
+      agendaType: req.agendaType,
+      participants: req.participants,
+      owner: { ...req.requester },
+      priority: req.priority ?? 'Normal',
+      ...(trainingType ? { trainingType } : {}),
+      ...(req.specialInstructions ? { specialInstructions: req.specialInstructions } : {}),
+      ...(req.hardwareRequirements?.length ? { hardwareRequirements: [...req.hardwareRequirements] } : {}),
+      ...(req.recurrence ? { recurrence: { ...req.recurrence } } : {}),
+      createdBy: by.login ?? toolLogin(by),
+      createdAt: this.now(),
+    }));
+    this.bookings.push(...created);
+    return { created: created.map(clone), cancelled: cancelled.map(clone) };
+  }
+
+  /** The rooms by id (each once), or NotFoundError before anything changes. */
+  private mustRooms(ids: string[]): Room[] {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) throw new NotAllowedError('Pick at least one room.');
+    return unique.map((id) => {
+      const room = this.rooms.find((r) => r.id === id);
+      if (!room) throw new NotFoundError(`Unknown room "${id}".`);
+      return room;
+    });
+  }
+
+  /**
+   * The bookings that hold these slots, for Admin's block or bulk booking: those in `cancel` (Admin saw them) are
+   * cancelled, `comment` telling their owners why; any other stops it (ConflictError, nothing changed).
+   */
+  private clearSlots(slots: Array<{ roomId: string } & Interval>, by: Actor, cancel: readonly string[], comment: string): Booking[] {
+    const now = this.now();
+    const hit = [...new Set(slots.flatMap((s) => conflictsFor(s.roomId, s, this.bookings, now)))];
+    // Another block is never cancelled this way: Admin lifts it first.
+    const block = hit.find((b) => b.status === 'Blocked');
+    if (block) throw new NotAllowedError(`${block.ticketNo} already blocks that room then (${block.agenda}). Lift that block first.`);
+    const unseen = hit.filter((b) => !cancel.includes(b.ticketNo));
+    if (unseen.length > 0) throw new ConflictError(unseen.map(clone));
+    for (const b of hit) {
+      b.status = 'Cancelled';
+      this.markAdmin(b, by, comment);
+    }
+    return hit;
+  }
+
   /** The room is free for `next` and, when its time or type changed, its owner holds no other room then (one room per person). */
   private assertFits(next: Booking, others: Booking[], recheckOwner: boolean): void {
     const conflicts = conflictsFor(next.roomId, next, others, this.now());
@@ -310,9 +402,10 @@ function defined<T extends object>(changes: T): Partial<T> {
   return Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
 
-/** A cancelled or completed booking can't be changed any more. */
+/** A cancelled or completed booking can't be changed any more, and a room block is only lifted. */
 function assertOpen(b: Booking): void {
   if (b.status === 'Cancelled' || b.status === 'Completed') throw new NotAllowedError(`${b.ticketNo} is ${b.status}.`);
+  if (b.status === 'Blocked') throw new NotAllowedError(blockIsFixed(b));
 }
 
 function clone(b: Booking): Booking {
@@ -332,6 +425,11 @@ function clone(b: Booking): Booking {
 /** Mock stand-in for the tool's "Created By" login (upper-case e-mail name). The real value comes from the tool. */
 function toolLogin(p: Person): string | undefined {
   return p.email?.split('@')[0]?.toUpperCase();
+}
+
+/** The Admin who blocks a room, as the block's owner (no login or role). */
+function personOf(by: Actor): Person {
+  return { name: by.name, ...(by.email ? { email: by.email } : {}), ...(by.division ? { division: by.division } : {}) };
 }
 
 /** Small deterministic random generator, so random demo data is the same on every start. */

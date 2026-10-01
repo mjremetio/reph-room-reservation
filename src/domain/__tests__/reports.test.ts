@@ -69,3 +69,11 @@ test('a booking released because nobody checked in still counts as a no-show', (
   assert.deepEqual([r.totals.bookings, r.totals.cancelled, r.totals.noShows], [0, 2, 1], 'cancelled, and only the released one is a no-show');
   assert.equal(r.byRoom.find((x) => x.roomId === 'tokyo')?.noShows, 1);
 });
+
+test("Admin's room blocks are not use: no bookings, hours, people or no-shows", () => {
+  const now = manila(2026, 9, 30, 12);
+  const bookings = [b('RM-1', 'coron', 29, 9, 8, 'Blocked', alpha, { agenda: 'Aircon maintenance', participants: 0 }), b('RM-2', 'tokyo', 29, 10, 1, 'Checked-In', bravo)];
+  const r = buildReport({ bookings, rooms: ROOMS, from: manila(2026, 9, 28), to: manila(2026, 10, 1), now });
+  assert.deepEqual([r.totals.bookings, r.totals.hours, r.totals.people, r.totals.noShows], [1, 1, 1, 0]);
+  assert.equal(r.byRoom.find((x) => x.roomId === 'coron')?.count, 0);
+});

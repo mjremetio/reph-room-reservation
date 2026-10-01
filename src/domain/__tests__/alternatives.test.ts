@@ -24,3 +24,8 @@ test('swap options fit the owner, are free for their whole slot, and prefer the 
   for (const o of options) assert.equal(availabilityFor(o.room.id, alpha, bookings, now).kind, 'available');
   assert.equal(options[0]?.room.floor, '2F');
 });
+
+test("an Admin room block offers no swap: there is nobody to ask", () => {
+  const block: Booking = { ...alpha, ticketNo: 'RM-3', status: 'Blocked', agenda: 'Aircon maintenance', participants: 0 };
+  assert.deepEqual(swapOptionsFor(block, ROOMS, [block], now), []);
+});

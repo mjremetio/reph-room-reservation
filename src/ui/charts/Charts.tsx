@@ -14,6 +14,7 @@ export const STATUS_COLOURS: Record<string, string> = {
   Completed: 'var(--muted)',
   Cancelled: 'var(--red)',
   Held: 'var(--line)',
+  Blocked: 'var(--ink)',
 };
 
 function DataTable({ head, rows }: { head: string[]; rows: Array<Array<string | number>> }) {

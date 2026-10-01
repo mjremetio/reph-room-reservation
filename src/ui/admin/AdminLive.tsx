@@ -3,7 +3,8 @@
 /**
  * Live Admin pages (docs/spec/06-ui.md, Admin): asks GET /api/admin/changes every 3 seconds (and as soon as the tab is
  * visible again). When anything changed it refreshes every Admin view and the message threads, so a new booking shows
- * up at once, and it shows a short notice for what other people did: a booking, a cancellation, a check-in, a message.
+ * up at once, and it shows a short notice for what other people did: a booking, a cancellation, a room block, a
+ * check-in, a message.
  */
 import { useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
@@ -21,6 +22,10 @@ function noticeFor(e: AuditView): { text: string; href: string } | null {
       return { text: `New booking ${e.target} by ${who}${e.detail ? `: ${e.detail}` : ''}`, href: '/admin/bookings' };
     case 'booking.cancel':
       return { text: `${who} cancelled ${e.target}`, href: '/admin/bookings' };
+    case 'booking.block':
+      return { text: `${who} blocked ${e.detail ?? e.target}`, href: '/admin/bookings' };
+    case 'booking.unblock':
+      return { text: `${who} lifted the block ${e.target}${e.detail ? ` (${e.detail})` : ''}`, href: '/admin/bookings' };
     case 'booking.checkin':
       return { text: `${who} checked in to ${e.target}`, href: '/admin/bookings' };
     case 'booking.release':

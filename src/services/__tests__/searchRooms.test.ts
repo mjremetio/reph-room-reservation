@@ -10,6 +10,7 @@ import { formatRange, manila } from '../../domain/time';
 import type { RoomRequest } from '../../domain/types';
 import { MockGateway } from '../../gateway/mockGateway';
 import { searchRooms } from '../searchRooms';
+import { searchResultViews } from '../views';
 
 const now = DEMO_SCENARIO.now; // Mon, Sep 28, 2026, 9:00 AM
 const gw = () => new MockGateway({ scenario: DEMO_SCENARIO, now: () => now });
@@ -123,4 +124,18 @@ test('a named room is reported with its real status even when it is not a best f
   assert.equal(await note('Snowdon'), 'Snowdon can be booked for Training only, not Meeting.');
   const unknown = await searchRooms(gw(), meeting(3, monday(12), monday(13)), now, undefined, { room: 'Atlantis' });
   assert.deepEqual([unknown.requested?.match, unknown.requested?.note], [null, 'No room called "Atlantis".']);
+});
+
+test("a room Admin blocked shows as taken by \"Admin\": never the Admin's name, division or reason, never the viewer's own", async () => {
+  const g = gw();
+  const admin = { name: 'Remetio, Mark Joseph', email: 'markjoseph.remetio@lexisnexis.com', login: 'MARKJOSEPH.REMETIO', role: 'admin' as const };
+  await g.blockRooms({ roomIds: ['amsterdam'], start: friday(9), end: friday(17), reason: 'Aircon maintenance' }, admin, []);
+  const r = await searchRooms(g, meeting(5, friday(10), friday(11)), now);
+  assert.ok(!r.fullyFree.some((m) => m.room.id === 'amsterdam'));
+  // The Admin who blocked it searches too: it is still "Admin", not "mine".
+  for (const viewer of ['lili.lagunoy@lexisnexis.com', admin.email]) {
+    const view = searchResultViews(r, viewer).results.find((x) => x.roomId === 'amsterdam');
+    assert.deepEqual(view?.conflicts?.map((c) => [c.owner, c.division, c.mine, c.status]), [['Admin', undefined, false, 'Blocked']], viewer);
+  }
+  assert.ok(!JSON.stringify(searchResultViews(r, admin.email)).includes('Aircon'), 'the reason stays with Admin');
 });

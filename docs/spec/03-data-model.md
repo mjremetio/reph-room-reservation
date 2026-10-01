@@ -27,7 +27,7 @@ Owned by **this app**: Proposal, map data (07), the app store `src/store/` (sign
 | `AgendaType` | `Meeting`, `Training`, `Pantry`, `Lactation Room`, `Multi-purpose` | Form "Type of Agenda" |
 | `RoomKind` | `Meeting`, `Collaboration`, `Huddle`, `Training`, `Multi-purpose`, `Pantry`, `Lactation Room`, `Visitor Office` | Guidelines p.8 room list |
 | `AV` | `VC`, `BYOD`, `null` | Guidelines p.8 |
-| `BookingStatus` | `Held`, `In Progress`, `Approved`, `Checked-In`, `Completed`, `Cancelled` | Tool statuses (+ `Held`, app only) |
+| `BookingStatus` | `Held`, `In Progress`, `Approved`, `Checked-In`, `Completed`, `Cancelled`, `Blocked` | Tool statuses (+ `Held` and `Blocked`, app only: `Blocked` is Admin's room block, 02 F35) |
 | `Priority` | `Normal`, `Urgent` | Form "Priority" (`Priority` in `types.ts`) |
 | `TrainingType` | `On-Site`, `Virtual` | Form "Type of Training" (`TrainingType` in `types.ts`) |
 
@@ -169,7 +169,7 @@ stateDiagram-v2
   Approved --> Cancelled: owner or Admin cancels, or released 15 min after start [P3]
   CheckedIn --> Completed: end time passes
 ```
-A submitted reservation is **In Progress** until Admin approves it (guidelines 3.5); the mock creates every booking as In Progress, and Admin approves or turns it down at `/admin` (02 F30). Admin changes (`updateBooking`, `swapRooms`) keep the status and set `modifiedBy`; approve, turn down and an Admin cancel also set `adminComments` when a comment is given. A booking nobody checked in to by start + 15 min becomes Cancelled with `releasedAt` (`releaseNoShows`, run first by every API route; 02 F34, `RULES.autoReleaseNoShows`). Completed is only set by the tool. Which bookings are approved straight away is RULES open question 2. `In Progress`, `Approved` and `Checked-In` block the room. `Held` blocks until `holdExpiresAt`. `Cancelled` and `Completed` don't (`isBlocking`).
+A submitted reservation is **In Progress** until Admin approves it (guidelines 3.5); the mock creates every booking as In Progress, and Admin approves or turns it down at `/admin` (02 F30). Admin changes (`updateBooking`, `swapRooms`) keep the status and set `modifiedBy`; approve, turn down and an Admin cancel also set `adminComments` when a comment is given. A booking nobody checked in to by start + 15 min becomes Cancelled with `releasedAt` (`releaseNoShows`, run first by every API route; 02 F34, `RULES.autoReleaseNoShows`). Completed is only set by the tool. Which bookings are approved straight away is RULES open question 2. `In Progress`, `Approved`, `Checked-In` and `Blocked` block the room. `Held` blocks until `holdExpiresAt`. `Cancelled` and `Completed` don't (`isBlocking`). An Admin room block (`blockRooms`, 02 F35) is a booking with status `Blocked`, the Admin as owner, the reason as agenda and 0 participants: it holds the room like a booking, but is nobody's own (`listMyBookings` and `ownConflicts` leave it out), is never released (`shouldAutoRelease`), is not counted in reports, offers no swap, and is only lifted (`cancelBooking`), never changed, moved or swapped (`blockIsFixed`). People see its owner as "Admin" (`shownOwner`).
 
 ## Invariants (enforced in code and tests)
 | # | Rule | Where |

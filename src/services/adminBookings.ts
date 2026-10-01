@@ -6,7 +6,7 @@ import { conflictsFor, ownConflicts } from '../domain/availability';
 import { adminChangeIssues, checkInWindow, ISSUE_FIELD, roomIssues, RULES } from '../domain/rules';
 import { formatManila, formatRange } from '../domain/time';
 import type { Booking, Room } from '../domain/types';
-import type { BookingChanges, ReservationGateway } from '../gateway/ReservationGateway';
+import { blockIsFixed, type BookingChanges, type ReservationGateway } from '../gateway/ReservationGateway';
 import type { Prepared } from './prepareBooking';
 
 type Failed = Extract<Prepared<never>, { ok: false }>;
@@ -41,7 +41,9 @@ export function describeChange(before: Booking, after: Booking, rooms: Room[]): 
  */
 export function clash(kind: 'room' | 'requester', conflicts: Booking[], rooms: Room[]): Failed {
   const head = kind === 'requester' ? 'The owner already has another room then (one room per person at a time).' : 'The room is taken then.';
-  const lines = conflicts.slice(0, 5).map((c) => `${c.owner.name} has ${bookingLabel(c, rooms)} (${c.ticketNo}).`);
+  const lines = conflicts
+    .slice(0, 5)
+    .map((c) => (c.status === 'Blocked' ? `Admin blocked ${bookingLabel(c, rooms)}: ${c.agenda} (${c.ticketNo}).` : `${c.owner.name} has ${bookingLabel(c, rooms)} (${c.ticketNo}).`));
   return { ok: false, code: 'CONFLICT', problems: [[head, lines[0]].filter(Boolean).join(' '), ...lines.slice(1)], fields: kind === 'requester' ? ['time'] : ['room', 'time'] };
 }
 
@@ -66,7 +68,7 @@ async function fits(gw: ReservationGateway, next: Booking, except: Booking[], ro
 /**
  * Checks an Admin change against the rules (adminChangeIssues) and for clashes before the gateway (which checks the
  * clashes again) writes it. Fails INVALID (with the form fields to mark), NOT_FOUND, CONFLICT, or NOT_ALLOWED for a
- * cancelled or completed booking.
+ * cancelled or completed booking, or a room block (lifted, never changed).
  */
 export async function prepareAdminChange(
   gw: ReservationGateway,
@@ -77,6 +79,7 @@ export async function prepareAdminChange(
   const before = await gw.getBooking(ticketNo);
   if (!before) return { ok: false, code: 'NOT_FOUND', problems: [`Booking ${ticketNo} not found.`] };
   if (before.status === 'Cancelled' || before.status === 'Completed') return { ok: false, code: 'NOT_ALLOWED', problems: [`${ticketNo} is ${before.status}.`] };
+  if (before.status === 'Blocked') return { ok: false, code: 'NOT_ALLOWED', problems: [blockIsFixed(before)] };
   const set = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined)) as BookingChanges;
   const after: Booking = { ...before, ...set };
   const rooms = await gw.listRooms();
@@ -97,7 +100,10 @@ export async function prepareAdminSwap(gw: ReservationGateway, ticketA: string, 
   const [a, b] = await Promise.all([gw.getBooking(ticketA), gw.getBooking(ticketB)]);
   if (!a || !b) return { ok: false, code: 'NOT_FOUND', problems: [`Booking ${!a ? ticketA : ticketB} not found.`] };
   if (a.ticketNo === b.ticketNo) return { ok: false, code: 'INVALID', problems: ['Pick two different bookings.'] };
-  for (const x of [a, b]) if (x.status === 'Cancelled' || x.status === 'Completed') return { ok: false, code: 'NOT_ALLOWED', problems: [`${x.ticketNo} is ${x.status}.`] };
+  for (const x of [a, b]) {
+    if (x.status === 'Cancelled' || x.status === 'Completed') return { ok: false, code: 'NOT_ALLOWED', problems: [`${x.ticketNo} is ${x.status}.`] };
+    if (x.status === 'Blocked') return { ok: false, code: 'NOT_ALLOWED', problems: [blockIsFixed(x)] };
+  }
   if (a.roomId === b.roomId) return { ok: false, code: 'INVALID', problems: ['Both bookings are in the same room.'] };
   const rooms = await gw.listRooms();
   // Each must suit the other's room: its Types of agenda and capacity (the owner's room booking list).

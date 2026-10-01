@@ -112,18 +112,19 @@ export const ProposalBody = z.preprocess(
 );
 
 /** GET /api/bookings: the tool's reservation list and its search panel (date range, type of agenda, site, building, room, employee name). */
-export const BookingsQuery = inRange(31)(
-  z.object({
-    from: isoTime,
-    to: isoTime,
+/** GET /api/bookings: without dates, every booking, past and future (the owner's request, 1 Oct 2026); either date narrows it. */
+export const BookingsQuery = z
+  .object({
+    from: isoTime.optional(),
+    to: isoTime.optional(),
     site: site.optional(),
     building: z.string().max(40).optional(),
     roomId: z.string().max(64).optional(),
     agendaType: z.enum(AGENDA_TYPES).optional(),
     employee: z.string().trim().max(80).optional(),
-    status: z.enum(['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled']).optional(),
-  }),
-);
+    status: z.enum(['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled', 'Blocked']).optional(),
+  })
+  .refine((q) => !(q.from && q.to) || q.to > q.from, { message: '"to" must be after "from".' });
 
 export const MyBookingsQuery = z.object({
   from: isoTime.optional(),
@@ -138,7 +139,7 @@ export const AssistantBody = z.object({
 
 // ---- Admin (/api/admin/*, docs/spec/04-api.md, Admin) and messages ----
 
-const STATUSES = ['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled'] as const;
+const STATUSES = ['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled', 'Blocked'] as const;
 const comment = z.string().trim().max(500);
 const notEmpty = (v: object) => Object.values(v).some((x) => x !== undefined);
 
@@ -171,6 +172,29 @@ export const BulkApproveBody = z.object({ ticketNos: z.array(z.string().max(32))
 
 /** POST /api/admin/bookings/swap: two bookings exchange rooms. */
 export const SwapBody = z.object({ a: z.string().min(1).max(32), b: z.string().min(1).max(32) });
+
+const roomIds = z.array(z.string().min(1).max(64)).min(1, 'Pick at least one room.').max(30);
+/** `dryRun`: only list the bookings it would cancel. `cancel`: the tickets Admin saw and agreed to cancel; any other stops it. */
+const confirm = { cancel: z.array(z.string().min(1).max(32)).max(1000).default([]), dryRun: z.boolean().default(false) };
+
+/** POST /api/admin/blocks: Admin blocks rooms for a time (maintenance, an event). */
+export const BlockBody = z.object({ roomIds, start: isoTime, end: isoTime, reason: z.string().trim().min(1, 'Add the reason.').max(200), ...confirm });
+
+/** POST /api/admin/bookings/bulk: Admin books several rooms (and the dates of a repeat) at once, for themself or `ownerEmail`. */
+export const BulkBookingBody = z.object({
+  roomIds,
+  agendaType: z.enum(AGENDA_TYPES),
+  agenda: z.string().trim().max(200),
+  start: isoTime,
+  end: isoTime,
+  participants,
+  priority: z.enum(['Normal', 'Urgent']).default('Normal'),
+  trainingType: z.enum(['On-Site', 'Virtual']).optional(),
+  specialInstructions: z.string().trim().max(500).optional(),
+  recurrence: RecurrenceBody.optional(),
+  ownerEmail: z.string().trim().max(200).optional(),
+  ...confirm,
+});
 
 /** GET /api/admin/reports: figures over the range (up to 92 days). */
 export const ReportQuery = inRange(92)(z.object({ from: isoTime, to: isoTime }));

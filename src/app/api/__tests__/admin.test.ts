@@ -1,6 +1,6 @@
 /**
  * Admin routes and messages on the demo scenario (docs/spec/04-api.md, Admin and Messages): who may call them,
- * approve / turn down / change / swap, users and resets, rooms, reports and the audit log.
+ * approve / turn down / change / swap, room blocks and bulk bookings, users and resets, rooms, reports and the audit log.
  * Handlers are called directly; the demo clock starts Mon, Sep 28, 9:00 AM. Tests share one gateway and store, in order.
  */
 import assert from 'node:assert/strict';
@@ -24,6 +24,9 @@ before(async () => {
     change: await load('../admin/bookings/[ticketNo]/route', 'PATCH'),
     bulk: await load('../admin/bookings/approve/route', 'POST'),
     swap: await load('../admin/bookings/swap/route', 'POST'),
+    block: await load('../admin/blocks/route', 'POST'),
+    bulkBook: await load('../admin/bookings/bulk/route', 'POST'),
+    publicBookings: await load('../bookings/route'),
     reports: await load('../admin/reports/route'),
     audit: await load('../admin/audit/route'),
     users: await load('../admin/users/route'),
@@ -80,6 +83,8 @@ test('every Admin route needs an Admin: 401 signed out, 403 for everyone else', 
     ['change', 'PATCH', '/api/admin/bookings/RM-0129906', { participants: 3 }, { ticketNo: 'RM-0129906' }],
     ['bulk', 'POST', '/api/admin/bookings/approve', { ticketNos: ['RM-0129906'] }, {}],
     ['swap', 'POST', '/api/admin/bookings/swap', { a: 'RM-0129901', b: 'RM-0129902' }, {}],
+    ['block', 'POST', '/api/admin/blocks', { roomIds: ['coron'], start: '2026-10-01T09:00:00+08:00', end: '2026-10-01T12:00:00+08:00', reason: 'Aircon' }, {}],
+    ['bulkBook', 'POST', '/api/admin/bookings/bulk', { roomIds: ['coron'], agendaType: 'Meeting', agenda: 'Sales huddle', start: '2026-10-01T09:00:00+08:00', end: '2026-10-01T10:00:00+08:00', participants: 4 }, {}],
     ['addUser', 'POST', '/api/admin/users', { name: 'Tester, Golf', email: 'golf.tester@example.com' }, {}],
     ['editUser', 'PATCH', `/api/admin/users/${JEREMIAH}`, { role: 'admin' }, { login: JEREMIAH }],
     ['reset', 'POST', `/api/admin/users/${LILI}/reset`, undefined, { login: LILI }],
@@ -303,4 +308,93 @@ test('nobody checked in 15 minutes after the start: the next request releases th
   } finally {
     process.env.DEMO_NOW = '2026-09-28T09:00:00+08:00';
   }
+});
+
+test('Admin blocks rooms: sees who is affected, cancels only those, people see "Admin"; a block is only lifted', async () => {
+  const thu = (h: number, m = 0) => `2026-10-01T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00+08:00`;
+  const lilis = await book(LILI, { roomId: 'coron', agenda: 'Client call prep', start: thu(10), end: thu(11) });
+  const block = { roomIds: ['coron', 'binondo'], start: thu(9), end: thu(12), reason: 'Aircon maintenance' };
+  const post = (body: unknown) => r.block!(req('POST', '/api/admin/blocks', as(ADMIN), body), params());
+
+  // Check first: nothing changes, and Admin sees whose booking is in the way.
+  const preview = await json(await post({ ...block, dryRun: true }));
+  assert.deepEqual(preview.affected.map((b: { ticketNo: string; owner: string }) => [b.ticketNo, b.owner]), [[lilis, 'Lagunoy, Lili']]);
+  assert.equal((await post({ ...block, reason: '  ' })).status, 400);
+  // Without agreeing to cancel it, Lili's booking stops the block.
+  const refused = await post(block);
+  assert.equal(refused.status, 409);
+  assert.match((await json(refused)).message, /^The room is taken then\. Lagunoy, Lili has Coron/);
+
+  const done = await json(await post({ ...block, cancel: [lilis] }));
+  assert.deepEqual(done.blocks.map((b: { roomId: string; status: string; agenda: string }) => [b.roomId, b.status, b.agenda]), [['coron', 'Blocked', 'Aircon maintenance'], ['binondo', 'Blocked', 'Aircon maintenance']]);
+  assert.deepEqual(done.cancelled.map((b: { ticketNo: string }) => b.ticketNo), [lilis]);
+  const [coronBlock, binondoBlock] = done.blocks.map((b: { ticketNo: string }) => b.ticketNo) as [string, string];
+
+  // Lili's booking is cancelled with the reason, and a message tells her.
+  const mine = await json(await r.mine!(req('GET', '/api/bookings/mine', as(LILI)), params()));
+  assert.equal(mine.bookings.some((b: { ticketNo: string }) => b.ticketNo === lilis), false, 'cancelled: not in My bookings');
+  const thread = await json(await r.thread!(req('GET', `/api/messages/${lilis}`, as(LILI)), params({ ticketNo: lilis })));
+  assert.match(thread.thread.messages.at(-1).text, /^Admin blocked Coron.* \(Aircon maintenance\), so this booking is cancelled\. Please book another room or time\.$/);
+
+  // Everyone else sees "Admin", not who blocked it or why; the employee filter can't find the Admin through it.
+  const day = 'from=2026-10-01T00:00:00%2B08:00&to=2026-10-02T00:00:00%2B08:00';
+  const seen = await json(await r.publicBookings!(req('GET', `/api/bookings?${day}&roomId=binondo`, as(LILI)), params()));
+  assert.deepEqual(seen.bookings.map((b: Record<string, unknown>) => [b.status, b.owner, b.division, b.mine, b.agenda]), [['Blocked', 'Admin', null, false, undefined]]);
+  const byName = await json(await r.publicBookings!(req('GET', `/api/bookings?${day}&employee=Remetio`, as(LILI)), params()));
+  assert.equal(byName.bookings.some((b: { status: string }) => b.status === 'Blocked'), false);
+  // Nobody can book it then, and it is nobody's own booking, not even the Admin's who made it.
+  const propose = await r.propose!(req('POST', '/api/proposals', as(LILI), { agendaType: 'Meeting', participants: 4, roomId: 'binondo', agenda: 'Design sync', start: thu(10), end: thu(11) }), params());
+  assert.equal(propose.status, 409);
+  const adminMine = await json(await r.mine!(req('GET', '/api/bookings/mine', as(ADMIN)), params()));
+  assert.equal(adminMine.bookings.some((b: { status: string }) => b.status === 'Blocked'), false);
+
+  // A block is never changed, and another block in the way must be lifted first.
+  const change = await r.change!(req('PATCH', `/api/admin/bookings/${binondoBlock}`, as(ADMIN), { end: thu(13) }), params({ ticketNo: binondoBlock }));
+  assert.equal(change.status, 403);
+  assert.match((await json(change)).message, /is a room block: lift it/);
+  const twice = await post({ ...block, roomIds: ['binondo'], start: thu(11), end: thu(13), cancel: [binondoBlock] });
+  assert.equal(twice.status, 403);
+  assert.match((await json(twice)).message, /^Admin already blocked Binondo/);
+
+  // Lifting it frees the room at once; it is logged, and no thread is started (nobody's booking).
+  const lifted = await json(await r.act!(req('POST', `/api/admin/bookings/${binondoBlock}`, as(ADMIN), { action: 'cancel' }), params({ ticketNo: binondoBlock })));
+  assert.equal(lifted.booking.status, 'Cancelled');
+  assert.deepEqual((await json(await r.thread!(req('GET', `/api/messages/${binondoBlock}`, as(ADMIN)), params({ ticketNo: binondoBlock })))).thread.messages, []);
+  await book(LILI, { roomId: 'binondo', agenda: 'Design sync', start: thu(10), end: thu(11) });
+  const log = await json(await r.audit!(req('GET', '/api/admin/audit', as(ADMIN)), params()));
+  const actions = (target: string) => log.entries.filter((e: { target: string }) => e.target === target).map((e: { action: string }) => e.action);
+  assert.deepEqual(actions(coronBlock), ['booking.block']);
+  assert.deepEqual(actions(binondoBlock), ['booking.unblock', 'booking.block']);
+  assert.ok(actions(lilis).includes('booking.cancel'));
+});
+
+test('Admin books several rooms at once for a person they pick: Approved, room rules apply, bookings in the way only on agreement', async () => {
+  const thu = (h: number) => `2026-10-01T${String(h).padStart(2, '0')}:00:00+08:00`;
+  const bulk = { roomIds: ['amsterdam', 'capetown'], agendaType: 'Meeting', agenda: 'Sales huddle', start: thu(13), end: thu(14), participants: 5, ownerEmail: 'jeremiah.sandoval@lexisnexis.com' };
+  const post = (body: unknown) => r.bulkBook!(req('POST', '/api/admin/bookings/bulk', as(ADMIN), body), params());
+  const lilis = await book(LILI, { roomId: 'amsterdam', agenda: 'Budget check', start: thu(13), end: thu(14) });
+
+  const preview = await json(await post({ ...bulk, dryRun: true }));
+  assert.deepEqual([preview.count, preview.owner, preview.affected.map((b: { ticketNo: string }) => b.ticketNo)], [2, 'Sandoval, Jeremiah', [lilis]]);
+  // The owner's room booking list binds Admin too; the owner must have an account or be in the employee list.
+  const wrongRoom = await json(await post({ ...bulk, roomIds: ['amsterdam', 'snowdon'], dryRun: true }));
+  assert.deepEqual([wrongRoom.code, wrongRoom.problems], ['INVALID', ['Snowdon can be booked for Training only, not Meeting.']]);
+  assert.equal((await post({ ...bulk, ownerEmail: 'nobody@example.com', dryRun: true })).status, 404);
+  // A weekly repeat books every room on every date.
+  const weekly = await json(await post({ ...bulk, roomIds: ['huddle7', 'huddle8'], participants: 4, start: '2026-10-02T09:00:00+08:00', end: '2026-10-02T10:00:00+08:00', recurrence: { freq: 'Weekly', every: 1, days: ['Friday'], until: '2026-10-16T23:59:00+08:00' }, dryRun: true }));
+  assert.equal(weekly.count, 6);
+
+  assert.equal((await post(bulk)).status, 409, "Lili's booking stops it until Admin agrees to cancel it");
+  const done = await json(await post({ ...bulk, cancel: [lilis] }));
+  assert.deepEqual(done.created.map((b: Record<string, unknown>) => [b.roomId, b.status, b.owner, b.createdBy]), [['amsterdam', 'Approved', 'Sandoval, Jeremiah', ADMIN], ['capetown', 'Approved', 'Sandoval, Jeremiah', ADMIN]]);
+  assert.deepEqual(done.cancelled.map((b: { ticketNo: string }) => b.ticketNo), [lilis]);
+
+  // Jeremiah holds both rooms at once (a bulk booking may), and a note tells him; Lili's note says why hers went.
+  const mine = await json(await r.mine!(req('GET', '/api/bookings/mine', as(JEREMIAH)), params()));
+  const created = done.created.map((b: { ticketNo: string }) => b.ticketNo) as string[];
+  assert.deepEqual(created.map((t) => mine.bookings.find((b: { ticketNo: string }) => b.ticketNo === t)?.status), ['Approved', 'Approved']);
+  const note = await json(await r.thread!(req('GET', `/api/messages/${created[0]}`, as(JEREMIAH)), params({ ticketNo: created[0] as string })));
+  assert.match(note.thread.messages[0].text, /^Admin booked this for you: Amsterdam, 2F · Thu, Oct 1, 1:00 PM – 2:00 PM\.$/);
+  const lili = await json(await r.thread!(req('GET', `/api/messages/${lilis}`, as(LILI)), params({ ticketNo: lilis })));
+  assert.match(lili.thread.messages.at(-1).text, /^Admin needs Amsterdam, 2F · .* for "Sales huddle", so this booking is cancelled\./);
 });

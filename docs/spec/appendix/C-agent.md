@@ -77,7 +77,7 @@ import { mailtoLink, teamsChatLink } from './links';
 type Ctx = RunContext<AssistantContext>;
 
 /** The tool's flat recurrence arguments (strict function calling) as the domain's Recurrence. */
-function toRecurrence(r: {
+export function toRecurrence(r: {
   freq: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
   every: number;
   days: Weekday[] | null;
@@ -98,6 +98,17 @@ function toRecurrence(r: {
 const AGENDA_TYPES = ['Meeting', 'Training', 'Pantry', 'Lactation Room', 'Multi-purpose'] as const;
 const isoTime = () => z.string().describe('ISO 8601 date and time with the +08:00 offset, e.g. 2026-09-28T15:00:00+08:00');
 
+/** A repeat as the model passes it (toRecurrence reads it). */
+export const recurrenceArgs = z.object({
+  freq: z.enum(['Daily', 'Weekly', 'Monthly', 'Yearly']),
+  every: z.number().int().min(1).describe('Every N days/weeks/months/years; usually 1'),
+  days: z.array(z.enum(WEEKDAYS)).nullable().describe('Weekly only: the weekdays'),
+  month_day: z.number().int().min(1).max(31).nullable().describe('Monthly on a day number, e.g. 15'),
+  month_week: z.enum(WEEK_OF_MONTH).nullable().describe('Monthly on e.g. the Third Thursday: the week'),
+  month_weekday: z.enum(WEEKDAYS).nullable().describe('Monthly on e.g. the Third Thursday: the weekday'),
+  until: isoTime().describe('Last date of the series (any time on that day)'),
+});
+
 function contextOf(rc?: Ctx): AssistantContext {
   if (!rc) throw new Error('The room assistant must run with an AssistantContext.');
   return rc.context;
@@ -110,17 +121,21 @@ function parseTime(value: string): Date {
 }
 
 const label = (r: Room) => `${r.name}, ${r.floor}`;
+/** Admin's room block has nobody to ask for a swap. */
+const BLOCKED = 'Admin blocked this room then, so it cannot be swapped and there is nobody to message. Offer another room or time.';
 const json = (value: unknown) => JSON.stringify(value);
 
 /** What the model may know about someone else's booking: name, division, time, group size and status only. */
 function otherBooking(b: Booking, rooms: Map<string, Room>) {
   const room = rooms.get(b.roomId);
+  // Admin's room block (status Blocked): Admin closed the room then; nobody to ask for a swap.
+  const block = b.status === 'Blocked';
   return {
     ticket_no: b.ticketNo,
     room: room ? label(room) : b.roomId,
     when: formatRange(b.start, b.end),
-    owner: b.owner.name,
-    division: b.owner.division ?? null,
+    owner: block ? 'Admin (room blocked)' : b.owner.name,
+    division: block ? null : (b.owner.division ?? null),
     participants: b.participants,
     status: b.status,
   };
@@ -253,18 +268,7 @@ export const proposeBooking = tool({
     training_type: z.enum(['On-Site', 'Virtual']).nullable().describe('Type of training, for Training only; null = On-Site. Ignored for other agenda types.'),
     special_instructions: z.string().nullable().describe('Anything the user asked to note for Admin; null if none'),
     hardware_requirements: z.array(z.enum(HARDWARE_OPTIONS)).nullable().describe('Extra hardware from the form list; null if none. Remind the user to file it in ServiceNow.'),
-    recurrence: z
-      .object({
-        freq: z.enum(['Daily', 'Weekly', 'Monthly', 'Yearly']),
-        every: z.number().int().min(1).describe('Every N days/weeks/months/years; usually 1'),
-        days: z.array(z.enum(WEEKDAYS)).nullable().describe('Weekly only: the weekdays'),
-        month_day: z.number().int().min(1).max(31).nullable().describe('Monthly on a day number, e.g. 15'),
-        month_week: z.enum(WEEK_OF_MONTH).nullable().describe('Monthly on e.g. the Third Thursday: the week'),
-        month_weekday: z.enum(WEEKDAYS).nullable().describe('Monthly on e.g. the Third Thursday: the weekday'),
-        until: isoTime().describe('Last date of the series (any time on that day)'),
-      })
-      .nullable()
-      .describe('Only when the user asks for a repeating booking; null otherwise'),
+    recurrence: recurrenceArgs.nullable().describe('Only when the user asks for a repeating booking; null otherwise'),
   }),
   async execute(args, rc?: Ctx) {
     const ctx = contextOf(rc);
@@ -373,6 +377,7 @@ export const findSwapOptions = tool({
     const gw = getGateway();
     const blocking = await gw.getBooking(args.ticket_no);
     if (!blocking) return json({ ok: false, problem: 'Booking not found.' });
+    if (blocking.status === 'Blocked') return json({ ok: false, problem: BLOCKED });
     const rooms = await gw.listRooms();
     const byId = new Map(rooms.map((r) => [r.id, r] as const));
     const bookings = await gw.getBookings({ from: blocking.start, to: blocking.end });
@@ -396,6 +401,7 @@ export const draftOwnerMessage = tool({
   async execute(args, rc?: Ctx) {
     const ctx = contextOf(rc);
     const b = await getGateway().getBooking(args.ticket_no);
+    if (b?.status === 'Blocked') return json({ ok: false, problem: BLOCKED });
     if (!b?.owner.email) return json({ ok: false, problem: 'There are no contact details for this booking owner.' });
     const link = args.channel === 'teams' ? teamsChatLink(b.owner.email, args.message) : mailtoLink(b.owner.email, 'About your room booking', args.message);
     ctx.emit({ type: 'draft_message', to: b.owner.name, channel: args.channel, text: args.message, link });
@@ -1499,7 +1505,37 @@ export type UiEvent =
   | { type: 'admin_action'; action: 'approve' | 'reject' | 'cancel' | 'checkin'; ticketNo: string; owner: string; summary: string; comment?: string }
   | { type: 'admin_change'; ticketNo: string; owner: string; change: string; summary: string; body: AdminChangeJson }
   | { type: 'admin_swap'; a: string; b: string; summary: string[] }
-  | { type: 'admin_message'; ticketNo: string; owner: string; summary: string; text: string };
+  | { type: 'admin_message'; ticketNo: string; owner: string; summary: string; text: string }
+  /**
+   * A room block or bulk booking: `affected` describes the bookings it would cancel, `cancel` holds their tickets. The
+   * button sends `body` with `cancel`, so any booking made after the card was shown stops it instead of being cancelled.
+   */
+  | { type: 'admin_block'; title: string; lines: string[]; affected: string[]; cancel: string[]; body: AdminBlockJson }
+  | { type: 'admin_bulk'; title: string; lines: string[]; affected: string[]; cancel: string[]; owner: string; count: number; body: AdminBulkJson };
+
+/** The body of POST /api/admin/blocks that an admin_block card sends (times as ISO). */
+export interface AdminBlockJson {
+  roomIds: string[];
+  start: string;
+  end: string;
+  reason: string;
+}
+
+/** The body of POST /api/admin/bookings/bulk that an admin_bulk card sends (times as ISO). */
+export interface AdminBulkJson {
+  roomIds: string[];
+  agendaType: AgendaType;
+  agenda: string;
+  start: string;
+  end: string;
+  participants: number;
+  priority?: Priority;
+  trainingType?: TrainingType;
+  specialInstructions?: string;
+  recurrence?: RecurrenceJson;
+  /** Who it is for; none = the Admin. Goes to the Admin's browser only, never to the model. */
+  ownerEmail?: string;
+}
 
 /** The body of PATCH /api/admin/bookings/{ticketNo} that an admin_change card sends (times as ISO). */
 export interface AdminChangeJson {
@@ -1575,6 +1611,8 @@ export interface AssistantContext {
   emit: (event: UiEvent) => void;
   /** How long prepared proposals wait for Confirm: the app's cards by default, longer for MCP confirm links. */
   proposalHoldMinutes?: number;
+  /** Admin assistant: the app's active accounts, whom Admin may book for besides the tool's employee list. */
+  people?: Requestor[];
 }
 ```
 
@@ -1617,6 +1655,7 @@ export function buildInstructions(ctx: AssistantContext): string {
     '- A named room with a group size or a booking ("Book Coron for 3", "Is Coron free for 3 people at 12?"): call find_rooms with it as `room`, then start with that room\'s status from `requested_room` (free: offer to book it; taken: who has it; can\'t host it: say why, in its words). Never call a room unavailable unless a tool says so.',
     '- One room per person at a time: if find_rooms warns that the user already has a room then, or propose_booking says so, tell them which booking it is and offer to cancel it or pick another time. Training and Multi-purpose bookings are exempt: one person may hold several of those at once.',
     '- Nothing free: say who has the rooms, offer the alternatives from find_rooms, and offer to contact an owner.',
+    '- "Admin (room blocked)" or status Blocked: Admin closed the room for that time. Say so, and offer another room or time; there is nobody to ask for a swap.',
     '- Prefer rooms that fit the group. Do not suggest a room much bigger than needed when a smaller one is free. Each room takes only its types of agenda, up to its capacity: offer only rooms find_rooms returns, never one it left out.',
     '- Training, Pantry and Multi-purpose bookings wait for Admin\'s approval after Confirm ("Requested – waiting for Admin"); Meeting and Lactation Room bookings are approved at once. Say which, when you show the confirm card.',
     '',
@@ -1801,11 +1840,11 @@ export const OFF_TOPIC_REPLY =
   'I can only help with rooms at REPH: finding, booking, checking in to or cancelling a room, and questions about the Room Reservation Guidelines. Try "Room for 5 today from 3 to 4 PM".';
 
 export const ADMIN_OFF_TOPIC_REPLY =
-  'I can only help Admin with room reservations at REPH: requests waiting for approval, bookings, changes and swaps, messages to owners, room schedules and usage reports. Try "What needs approval today?".';
+  'I can only help Admin with room reservations at REPH: requests waiting for approval, bookings, changes and swaps, room blocks and bulk bookings, messages to owners, room schedules and usage reports. Try "What needs approval today?".';
 
 /** Admin talk that is always in scope for the Admin assistant, on top of BOOKING_WORDS. */
 export const ADMIN_WORDS =
-  /\b(approv(e|ed|al|als)|reject(ed)?|turn(ed)? down|decline|requests?|pending|waiting|queue|reports?|usage|utili[sz]ation|no[- ]?shows?|busiest|least|stats?|statistics|trends?|owners?|message|reply|remind|tickets?|rm-\d+|move|extend|shorten|change|division|requesters?)\b/i;
+  /\b(approv(e|ed|al|als)|reject(ed)?|turn(ed)? down|decline|requests?|pending|waiting|queue|reports?|usage|utili[sz]ation|no[- ]?shows?|busiest|least|stats?|statistics|trends?|owners?|message|reply|remind|tickets?|rm-\d+|move|extend|shorten|change|division|requesters?|(un)?block(s|ed|ing)?|bulk)\b/i;
 
 const BOOKING_WORDS =
   /\b(rooms?|book(ing|ed)?|reserv(e|ation)|cancel|check(ed|ing)?[- ]?in|meeting|training|workshop|town ?hall|hall|mph|huddle|floor|2f|3f|seats?|people|pax|participants|today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|morning|afternoon|noon|agenda|swap|free|available|vc|byod|video|call|teams|laptop|screen|display|monitor|hdmi|dock|panel|projector|speaker|mic|camera|chairs?|tables?|sound|catering|hardware|servicenow|non-solus|admin|visitor office|lactation|pump(ing)?|breast ?(milk|feeding)|nursing|pantry|guidelines?|outlook|\.ics|calendar|requestor|my name|bldg|manila|iloilo|shift)\b/i;
@@ -2083,6 +2122,7 @@ export function streamAgent(opts: {
   history: Array<Record<string, unknown>>;
   /** Notes from the app (never from client text) placed before the user's message. */
   notes?: AgentInputItem[];
+  people?: AssistantContext['people'];
   unavailable: string;
   offTopicReply: string;
 }): Response {
@@ -2102,7 +2142,7 @@ export function streamAgent(opts: {
           open = false; // the browser went away
         }
       };
-      const context: AssistantContext = { user, now: now(), defaultSite: 'Manila', emit: (e: UiEvent) => send('ui', e) };
+      const context: AssistantContext = { user, now: now(), defaultSite: 'Manila', emit: (e: UiEvent) => send('ui', e), ...(opts.people ? { people: opts.people } : {}) };
       const tools: string[] = [];
       try {
         const history = trimHistory(opts.history) as unknown as AgentInputItem[];
@@ -2244,7 +2284,7 @@ export function buildAdminInstructions(ctx: AssistantContext): string {
   const week = manilaStartOfWeek(ctx.now);
   return [
     'You are the assistant for Admin (Corporate Services) of the room reservation system at Reed Elsevier Philippines (REPH): Bldg. H in Manila (2F and 3F). You help Admin review requests, manage bookings, message the people who booked, and understand how rooms are used.',
-    `Today is ${formatManilaNow(ctx.now)} in Asia/Manila (UTC+8, PHT): the current date and time. Count "today", "tomorrow", weekdays and dates without a year from it, in Asia/Manila whatever the Admin's own time zone. The office runs 24/7. Admin signed in: ${ctx.user.name}. Pass times to tools as ISO 8601 with +08:00; "today" runs from 12:00 AM to 12:00 AM the next day.`,
+    `Today is ${formatManilaNow(ctx.now)} in Asia/Manila (UTC+8, PHT): the current date and time. Count "today", "tomorrow", weekdays and dates without a year from it, in Asia/Manila whatever the Admin's own time zone; a weekday alone ("Friday") is the next one from today, so never ask which date it is. The office runs 24/7. Admin signed in: ${ctx.user.name}. Pass times to tools as ISO 8601 with +08:00; "today" runs from 12:00 AM to 12:00 AM the next day.`,
     `Weeks run Monday to Sunday: "this week" is ${day.format(week)} – ${day.format(addMinutes(week, 6 * 24 * 60))} (the week that contains today, including its days still to come), "last week" the one before, "next week" the one after.`,
     '',
     'Facts come from tools',
@@ -2253,9 +2293,12 @@ export function buildAdminInstructions(ctx: AssistantContext): string {
     '',
     'Actions are cards (nothing changes until the Admin presses the button)',
     '- Approve, turn down, cancel or check in → prepare_admin_action. Change room, time, size, agenda, type or priority → prepare_booking_change. Two bookings exchange rooms → prepare_room_swap. A note to the person who booked → draft_message_to_owner.',
+    '- Close rooms for a time (maintenance, an event, a visit) → prepare_room_block, with the Admin\'s reason. Book several rooms at once, the same type and time, for the Admin or a person they name → prepare_bulk_booking (a repeat books every date). Both list the bookings in the way: say how many and whose. Pressing the button cancels them and messages each owner.',
+    '- The card is the confirmation: once the rooms and the time are clear, prepare it at once. Ask only for what is missing (a block\'s reason, a bulk booking\'s title). Type of agenda for a bulk booking: Meeting, unless the Admin says training, a course or a workshop (Training), a hall event (Multi-purpose), lactation or pantry.',
+    '- A block is lifted by cancelling it: find_bookings with status Blocked, then prepare_admin_action with cancel. A block can\'t be changed or swapped; to move it, lift it and block again. Another block in the way must be lifted first.',
     '- Find the ticket first (waiting_requests or find_bookings), then call the prepare tool in the same turn. Never end with "I will…".',
     '- Turning a request down needs a reason. If the Admin gave none, suggest one short reason and ask them to confirm it before preparing the card.',
-    '- Never say approved, turned down, changed, swapped, cancelled, checked in or sent: say the card is ready and what pressing it will do.',
+    '- Never say approved, turned down, changed, swapped, cancelled, checked in, blocked, booked or sent: say the card is ready and what pressing it will do.',
     '- When a change or swap clashes, name the person who has the room then and their time (the tool says "<name> has <room> · <time>"), and offer room_schedule to find a free room.',
     '- Approving several requests: prepare one card per request, or point the Admin to Bookings → select → Approve selected.',
     '- Adding people, resetting accounts, roles and room details are done on the Users and Rooms pages; you cannot do them. Say where to go in one sentence.',
@@ -2298,18 +2341,22 @@ export const adminAssistant = new Agent<AssistantContext>({
  */
 import { tool, type RunContext } from '@openai/agents';
 import { z } from 'zod';
+import { matchPeople } from '../domain/people';
+import { toRecurrenceJson } from '../domain/recurrence';
 import { buildReport, waitingForAdmin } from '../domain/reports';
 import { addMinutes, formatManila, formatRange, manilaDateKey } from '../domain/time';
-import type { Booking, BookingStatus, Room } from '../domain/types';
+import type { Booking, BookingStatus, Interval, Room } from '../domain/types';
 import { getGateway } from '../gateway';
+import type { Requestor } from '../gateway/ReservationGateway';
+import { bookablePeople, BULK_LIMITS, prepareBulkBooking, prepareRoomBlock } from '../services/adminBlocks';
 import { bookingLabel, describeChange, prepareAdminAction, prepareAdminChange, prepareAdminSwap } from '../services/adminBookings';
 import { matchRooms } from '../services/roomSchedule';
 import type { AdminChangeJson, AssistantContext } from './context';
-import { listRooms, roomScheduleTool } from './tools';
+import { listRooms, recurrenceArgs, roomScheduleTool, toRecurrence } from './tools';
 
 type Ctx = RunContext<AssistantContext>;
 
-const STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled'] as const satisfies readonly BookingStatus[];
+const STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled', 'Blocked'] as const satisfies readonly BookingStatus[];
 const AGENDA_TYPES = ['Meeting', 'Training', 'Pantry', 'Lactation Room', 'Multi-purpose'] as const;
 const isoTime = () => z.string().describe('ISO 8601 date and time with the +08:00 offset, e.g. 2026-09-28T15:00:00+08:00');
 const json = (value: unknown) => JSON.stringify(value);
@@ -2516,7 +2563,155 @@ export const draftMessageToOwner = tool({
   },
 });
 
-export const adminTools = [waitingRequests, findBookings, usageReport, roomScheduleTool, listRooms, prepareAdminActionTool, prepareBookingChange, prepareRoomSwap, draftMessageToOwner];
+/** The rooms as the Admin named them (or their ids), each exactly one room. */
+function roomsNamed(rooms: Room[], names: string[]): { ok: true; rooms: Room[] } | { ok: false; problem: string } {
+  const picked: Room[] = [];
+  for (const name of names) {
+    const found = matchRooms(rooms, name);
+    if (found.length !== 1) return { ok: false, problem: found.length ? `"${name}" matches ${found.map((r) => r.name).join(', ')}. Which one?` : `No room called "${name}".` };
+    picked.push(found[0] as Room);
+  }
+  return { ok: true, rooms: picked };
+}
+
+/** A booking a block or bulk booking would cancel, as its card lists it. */
+const affectedLine = (b: Booking, rooms: Room[]) => `${b.ticketNo} · ${b.owner.name} · ${bookingLabel(b, rooms)} · ${b.status === 'In Progress' ? 'waiting for Admin' : b.status}`;
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const CARD_NOTE = 'Ask the Admin to check the card and press its button. Nothing has changed yet.';
+
+export const prepareRoomBlockTool = tool({
+  name: 'prepare_room_block',
+  description:
+    'Show the Admin a card to block rooms for a time (maintenance, an event, a visit): nobody else can book them then. Lists the bookings already there; the block cancels them and their owners get a message. Nothing changes until the Admin presses the button.',
+  parameters: z.object({
+    rooms: z.array(z.string()).min(1).max(BULK_LIMITS.rooms).describe('Each room as the Admin named it, e.g. ["Batanes", "Coron"], or room ids from list_rooms'),
+    start: isoTime(),
+    end: isoTime(),
+    reason: z.string().max(200).describe('Why, e.g. "Aircon maintenance". Ask the Admin if they gave none.'),
+  }),
+  async execute(args, rc?: Ctx) {
+    const ctx = contextOf(rc);
+    const gw = getGateway();
+    const all = await gw.listRooms();
+    const named = roomsNamed(all, args.rooms);
+    if (!named.ok) return json({ ok: false, problems: [named.problem] });
+    const prepared = await prepareRoomBlock(gw, { roomIds: named.rooms.map((r) => r.id), start: parseTime(args.start), end: parseTime(args.end), reason: args.reason }, ctx.now);
+    if (!prepared.ok) return failed(prepared);
+    const { rooms, start, end, reason, affected } = prepared.value;
+    const names = rooms.map((r) => `${r.name}, ${r.floor}`);
+    ctx.emit({
+      type: 'admin_block',
+      title: `Block ${plural(rooms.length, 'room')}`,
+      lines: [names.join(' · '), formatRange(start, end), `Reason: ${reason}`],
+      affected: affected.map((b) => affectedLine(b, all)),
+      cancel: affected.map((b) => b.ticketNo),
+      body: { roomIds: rooms.map((r) => r.id), start: start.toISOString(), end: end.toISOString(), reason },
+    });
+    return json({ ok: true, shown_to_user: true, rooms: names, when: formatRange(start, end), reason, would_cancel: affected.length, bookings_in_the_way: affected.slice(0, 20).map((b) => forAdmin(b, all)), note: CARD_NOTE });
+  },
+});
+
+export const prepareBulkBookingTool = tool({
+  name: 'prepare_bulk_booking',
+  description:
+    'Show the Admin a card to book several rooms at once, and each for every date of a repeat, Approved at once, for the Admin or a person they name. Each room must take the type of agenda and the group. Lists the bookings in the way; it cancels them and their owners get a message. Nothing changes until the Admin presses the button.',
+  parameters: z.object({
+    rooms: z.array(z.string()).min(1).max(BULK_LIMITS.rooms).describe('Each room as the Admin named it, or room ids from list_rooms'),
+    agenda_type: z.enum(AGENDA_TYPES),
+    agenda: z.string().max(200).describe('Specific title, e.g. "Sales onboarding week". Ask the Admin if they gave none.'),
+    start: isoTime().describe('The first date\'s start'),
+    end: isoTime().describe('The first date\'s end'),
+    participants: z.number().int().min(1).max(500).describe('People in each room'),
+    owner: z.string().nullable().describe('The person it is for, as the Admin named them, e.g. "Lili"; null = the Admin'),
+    priority: z.enum(['Normal', 'Urgent']).nullable(),
+    training_type: z.enum(['On-Site', 'Virtual']).nullable().describe('Training only; null = On-Site'),
+    special_instructions: z.string().max(500).nullable(),
+    recurrence: recurrenceArgs.nullable().describe('Only when the Admin asks for a repeat (every day, every Monday, …); null otherwise'),
+  }),
+  async execute(args, rc?: Ctx) {
+    const ctx = contextOf(rc);
+    const gw = getGateway();
+    const all = await gw.listRooms();
+    const named = roomsNamed(all, args.rooms);
+    if (!named.ok) return json({ ok: false, problems: [named.problem] });
+    let ownerEmail: string | undefined;
+    if (args.owner?.trim()) {
+      const found = matchPeople(await bookablePeople(gw, ctx.people ?? []), args.owner);
+      if (found.length !== 1) {
+        return json({ ok: false, problems: [found.length ? `"${args.owner}" matches ${found.slice(0, 5).map((p) => p.name).join('; ')}. Which one?` : `Nobody called "${args.owner}" has an account or is in the employee list.`] });
+      }
+      ownerEmail = (found[0] as Requestor).email;
+    }
+    const recurrence = args.recurrence ? toRecurrence(args.recurrence) : undefined;
+    const input = {
+      roomIds: named.rooms.map((r) => r.id),
+      start: parseTime(args.start),
+      end: parseTime(args.end),
+      recurrence,
+      agenda: args.agenda.trim(),
+      agendaType: args.agenda_type,
+      participants: args.participants,
+      ownerEmail,
+      priority: args.priority ?? undefined,
+      trainingType: args.agenda_type === 'Training' ? (args.training_type ?? 'On-Site') : undefined,
+      specialInstructions: args.special_instructions?.trim() || undefined,
+    };
+    const prepared = await prepareBulkBooking(gw, input, ctx.user, ctx.now, ctx.people ?? []);
+    if (!prepared.ok) return failed(prepared);
+    const { rooms, dates, owner, affected } = prepared.value;
+    const names = rooms.map((r) => `${r.name}, ${r.floor}`);
+    const count = rooms.length * dates.length;
+    const first = dates[0] as Interval;
+    const when = dates.length === 1 ? formatRange(first.start, first.end) : `${plural(dates.length, 'date')}: ${dates.slice(0, 3).map((d) => formatRange(d.start, d.end)).join('; ')}${dates.length > 3 ? '; …' : ''}`;
+    ctx.emit({
+      type: 'admin_bulk',
+      title: `Bulk booking · ${plural(count, 'booking')}`,
+      lines: [`${input.agenda} · ${input.agendaType} · ${input.participants} people each`, names.join(' · '), when, `For ${owner.name} · Approved at once`],
+      affected: affected.map((b) => affectedLine(b, all)),
+      cancel: affected.map((b) => b.ticketNo),
+      owner: owner.name,
+      count,
+      body: {
+        roomIds: input.roomIds,
+        agendaType: input.agendaType,
+        agenda: input.agenda,
+        start: input.start.toISOString(),
+        end: input.end.toISOString(),
+        participants: input.participants,
+        ...(input.priority ? { priority: input.priority } : {}),
+        ...(input.trainingType ? { trainingType: input.trainingType } : {}),
+        ...(input.specialInstructions ? { specialInstructions: input.specialInstructions } : {}),
+        ...(recurrence ? { recurrence: toRecurrenceJson(recurrence) } : {}),
+        ...(ownerEmail ? { ownerEmail } : {}),
+      },
+    });
+    return json({
+      ok: true,
+      shown_to_user: true,
+      bookings: count,
+      rooms: names,
+      dates: dates.slice(0, 10).map((d) => formatRange(d.start, d.end)),
+      for: owner.name,
+      would_cancel: affected.length,
+      bookings_in_the_way: affected.slice(0, 20).map((b) => forAdmin(b, all)),
+      note: CARD_NOTE,
+    });
+  },
+});
+
+export const adminTools = [
+  waitingRequests,
+  findBookings,
+  usageReport,
+  roomScheduleTool,
+  listRooms,
+  prepareAdminActionTool,
+  prepareBookingChange,
+  prepareRoomSwap,
+  prepareRoomBlockTool,
+  prepareBulkBookingTool,
+  draftMessageToOwner,
+];
 ```
 
 ### 10.3 Route
@@ -2535,7 +2730,7 @@ import { bookingLabel } from '../../../../services/adminBookings';
 import { streamAgent } from '../../_agentStream';
 import { fail, parseBody, rateLimited } from '../../_http';
 import { AssistantBody } from '../../_schemas';
-import { adminGuard } from '../_admin';
+import { accountPeople, adminGuard } from '../_admin';
 import { shared } from '../../_shared';
 
 export const runtime = 'nodejs';
@@ -2556,10 +2751,10 @@ export const POST = shared(async function post(request: Request): Promise<Respon
   const notes: AgentInputItem[] = [];
   for (const ticketNo of parsed.data.confirmedTickets) {
     const b = await gw.getBooking(ticketNo);
-    if (b) notes.push({ role: 'system', content: `App note: the Admin pressed a card's button; ${b.ticketNo} is now ${b.status} (${b.owner.name}, ${bookingLabel(b, rooms)}).` });
+    if (b) notes.push({ role: 'system', content: `App note: the Admin pressed a card's button; ${b.ticketNo} is now ${b.status} (${b.status === 'Blocked' ? `room block: ${b.agenda}` : b.owner.name}, ${bookingLabel(b, rooms)}).` });
   }
   // The run's user has no role: the tools only prepare cards, so nothing here acts as Admin.
   const { role: _role, ...user } = admin;
-  return streamAgent({ route: 'admin-assistant', request, agent: adminAssistant, user, message: parsed.data.message, history: parsed.data.history, notes, unavailable: UNAVAILABLE, offTopicReply: ADMIN_OFF_TOPIC_REPLY });
+  return streamAgent({ route: 'admin-assistant', request, agent: adminAssistant, user, message: parsed.data.message, history: parsed.data.history, notes, people: accountPeople(), unavailable: UNAVAILABLE, offTopicReply: ADMIN_OFF_TOPIC_REPLY });
 }, { lock: false });
 ```

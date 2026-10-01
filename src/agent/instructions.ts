@@ -27,6 +27,7 @@ export function buildInstructions(ctx: AssistantContext): string {
     '- A named room with a group size or a booking ("Book Coron for 3", "Is Coron free for 3 people at 12?"): call find_rooms with it as `room`, then start with that room\'s status from `requested_room` (free: offer to book it; taken: who has it; can\'t host it: say why, in its words). Never call a room unavailable unless a tool says so.',
     '- One room per person at a time: if find_rooms warns that the user already has a room then, or propose_booking says so, tell them which booking it is and offer to cancel it or pick another time. Training and Multi-purpose bookings are exempt: one person may hold several of those at once.',
     '- Nothing free: say who has the rooms, offer the alternatives from find_rooms, and offer to contact an owner.',
+    '- "Admin (room blocked)" or status Blocked: Admin closed the room for that time. Say so, and offer another room or time; there is nobody to ask for a swap.',
     '- Prefer rooms that fit the group. Do not suggest a room much bigger than needed when a smaller one is free. Each room takes only its types of agenda, up to its capacity: offer only rooms find_rooms returns, never one it left out.',
     '- Training, Pantry and Multi-purpose bookings wait for Admin\'s approval after Confirm ("Requested – waiting for Admin"); Meeting and Lactation Room bookings are approved at once. Say which, when you show the confirm card.',
     '',

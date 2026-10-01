@@ -12,7 +12,7 @@ export function isBlocking(b: Booking, now: Date): boolean {
     case 'Held':
       return !!b.holdExpiresAt && b.holdExpiresAt.getTime() > now.getTime();
     default:
-      return true; // In Progress, Approved, Checked-In
+      return true; // In Progress, Approved, Checked-In, Blocked
   }
 }
 
@@ -30,11 +30,12 @@ export function conflictsFor(roomId: string, want: Interval, bookings: Booking[]
 /**
  * The person's own bookings (any room) that overlap `want` and still hold their room (RULES.oneRoomPerPersonAtATime).
  * Training and Multi-purpose bookings may be held several at once: they neither clash nor count (countsForOneRoom).
+ * Admin's room blocks never count either.
  */
 export function ownConflicts(email: string, want: Interval & { agendaType: AgendaType }, bookings: Booking[], now: Date): Booking[] {
   if (!countsForOneRoom(want.agendaType)) return [];
   return bookings
-    .filter((b) => countsForOneRoom(b.agendaType) && sameEmail(b.owner.email, email) && isBlocking(b, now) && overlaps(want, b))
+    .filter((b) => b.status !== 'Blocked' && countsForOneRoom(b.agendaType) && sameEmail(b.owner.email, email) && isBlocking(b, now) && overlaps(want, b))
     .sort((x, y) => x.start.getTime() - y.start.getTime());
 }
 

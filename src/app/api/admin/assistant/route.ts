@@ -10,7 +10,7 @@ import { bookingLabel } from '../../../../services/adminBookings';
 import { streamAgent } from '../../_agentStream';
 import { fail, parseBody, rateLimited } from '../../_http';
 import { AssistantBody } from '../../_schemas';
-import { adminGuard } from '../_admin';
+import { accountPeople, adminGuard } from '../_admin';
 import { shared } from '../../_shared';
 
 export const runtime = 'nodejs';
@@ -31,9 +31,9 @@ export const POST = shared(async function post(request: Request): Promise<Respon
   const notes: AgentInputItem[] = [];
   for (const ticketNo of parsed.data.confirmedTickets) {
     const b = await gw.getBooking(ticketNo);
-    if (b) notes.push({ role: 'system', content: `App note: the Admin pressed a card's button; ${b.ticketNo} is now ${b.status} (${b.owner.name}, ${bookingLabel(b, rooms)}).` });
+    if (b) notes.push({ role: 'system', content: `App note: the Admin pressed a card's button; ${b.ticketNo} is now ${b.status} (${b.status === 'Blocked' ? `room block: ${b.agenda}` : b.owner.name}, ${bookingLabel(b, rooms)}).` });
   }
   // The run's user has no role: the tools only prepare cards, so nothing here acts as Admin.
   const { role: _role, ...user } = admin;
-  return streamAgent({ route: 'admin-assistant', request, agent: adminAssistant, user, message: parsed.data.message, history: parsed.data.history, notes, unavailable: UNAVAILABLE, offTopicReply: ADMIN_OFF_TOPIC_REPLY });
+  return streamAgent({ route: 'admin-assistant', request, agent: adminAssistant, user, message: parsed.data.message, history: parsed.data.history, notes, people: accountPeople(), unavailable: UNAVAILABLE, offTopicReply: ADMIN_OFF_TOPIC_REPLY });
 }, { lock: false });

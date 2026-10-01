@@ -2,7 +2,8 @@
 
 /**
  * S16 Admin bookings (docs/spec/06-ui.md): every booking in a range with all fields. Filter, search, sort, page,
- * approve the selected requests at once, export CSV (all filtered rows or the selected ones), open one to act on it.
+ * approve the selected requests at once, export CSV (all filtered rows or the selected ones), open one to act on it,
+ * block rooms for a time or book several at once (AdminBlockBulk).
  */
 import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
@@ -10,10 +11,11 @@ import { adminApi, type AdminBooking } from '../api';
 import { fmtTool, fmtToolDate, fmtWhen } from '../format';
 import { DataGrid, type Column } from '../table/DataGrid';
 import { AGENDA_TYPES } from '../TimeFields';
+import { BlockRoomsSheet, BulkBookingSheet } from './AdminBlockBulk';
 import { AdminBookingSheet } from './AdminBookingSheet';
 import { RangePicker, StatusChip, useAdminAction, useRange } from './shared';
 
-const STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled'] as const;
+const STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled', 'Blocked'] as const;
 
 export function AdminBookings() {
   const [range, setRange, now] = useRange('next7');
@@ -22,6 +24,7 @@ export function AdminBookings() {
   const [type, setType] = useState('');
   const [open, setOpen] = useState<AdminBooking | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [tool, setTool] = useState<'block' | 'bulk' | null>(null);
   const bulk = useAdminAction();
   const bookings = useQuery({
     queryKey: ['admin', 'bookings', range.from.toISOString(), range.to.toISOString(), status],
@@ -74,9 +77,19 @@ export function AdminBookings() {
 
   return (
     <div className="admin-page">
-      <header className="admin-page__head">
-        <h1>Bookings</h1>
-        <p className="card__meta">Every reservation with all its fields. Open one to approve, change, swap, cancel or message its owner.</p>
+      <header className="admin-page__head admin-page__head--row">
+        <div>
+          <h1>Bookings</h1>
+          <p className="card__meta">Every reservation with all its fields. Open one to approve, change, swap, cancel or message its owner, or to lift a room block.</p>
+        </div>
+        <div className="btn-row">
+          <button className="btn btn--secondary btn--small" onClick={() => setTool('block')} disabled={rooms.length === 0}>
+            Block rooms…
+          </button>
+          <button className="btn btn--primary btn--small" onClick={() => setTool('bulk')} disabled={rooms.length === 0}>
+            Bulk booking…
+          </button>
+        </div>
       </header>
       {notice && (
         <div className="banner banner--info" role="status">
@@ -134,6 +147,8 @@ export function AdminBookings() {
         }
       />
       {open && <AdminBookingSheet booking={open} rooms={rooms} others={bookings.data ?? []} onClose={() => setOpen(null)} />}
+      {tool === 'block' && <BlockRoomsSheet rooms={rooms} onClose={() => setTool(null)} />}
+      {tool === 'bulk' && <BulkBookingSheet rooms={rooms} onClose={() => setTool(null)} />}
     </div>
   );
 }

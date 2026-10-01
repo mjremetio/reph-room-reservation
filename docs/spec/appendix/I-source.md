@@ -706,18 +706,19 @@ export const ProposalBody = z.preprocess(
 );
 
 /** GET /api/bookings: the tool's reservation list and its search panel (date range, type of agenda, site, building, room, employee name). */
-export const BookingsQuery = inRange(31)(
-  z.object({
-    from: isoTime,
-    to: isoTime,
+/** GET /api/bookings: without dates, every booking, past and future (the owner's request, 1 Oct 2026); either date narrows it. */
+export const BookingsQuery = z
+  .object({
+    from: isoTime.optional(),
+    to: isoTime.optional(),
     site: site.optional(),
     building: z.string().max(40).optional(),
     roomId: z.string().max(64).optional(),
     agendaType: z.enum(AGENDA_TYPES).optional(),
     employee: z.string().trim().max(80).optional(),
-    status: z.enum(['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled']).optional(),
-  }),
-);
+    status: z.enum(['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled', 'Blocked']).optional(),
+  })
+  .refine((q) => !(q.from && q.to) || q.to > q.from, { message: '"to" must be after "from".' });
 
 export const MyBookingsQuery = z.object({
   from: isoTime.optional(),
@@ -732,7 +733,7 @@ export const AssistantBody = z.object({
 
 // ---- Admin (/api/admin/*, docs/spec/04-api.md, Admin) and messages ----
 
-const STATUSES = ['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled'] as const;
+const STATUSES = ['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled', 'Blocked'] as const;
 const comment = z.string().trim().max(500);
 const notEmpty = (v: object) => Object.values(v).some((x) => x !== undefined);
 
@@ -765,6 +766,29 @@ export const BulkApproveBody = z.object({ ticketNos: z.array(z.string().max(32))
 
 /** POST /api/admin/bookings/swap: two bookings exchange rooms. */
 export const SwapBody = z.object({ a: z.string().min(1).max(32), b: z.string().min(1).max(32) });
+
+const roomIds = z.array(z.string().min(1).max(64)).min(1, 'Pick at least one room.').max(30);
+/** `dryRun`: only list the bookings it would cancel. `cancel`: the tickets Admin saw and agreed to cancel; any other stops it. */
+const confirm = { cancel: z.array(z.string().min(1).max(32)).max(1000).default([]), dryRun: z.boolean().default(false) };
+
+/** POST /api/admin/blocks: Admin blocks rooms for a time (maintenance, an event). */
+export const BlockBody = z.object({ roomIds, start: isoTime, end: isoTime, reason: z.string().trim().min(1, 'Add the reason.').max(200), ...confirm });
+
+/** POST /api/admin/bookings/bulk: Admin books several rooms (and the dates of a repeat) at once, for themself or `ownerEmail`. */
+export const BulkBookingBody = z.object({
+  roomIds,
+  agendaType: z.enum(AGENDA_TYPES),
+  agenda: z.string().trim().max(200),
+  start: isoTime,
+  end: isoTime,
+  participants,
+  priority: z.enum(['Normal', 'Urgent']).default('Normal'),
+  trainingType: z.enum(['On-Site', 'Virtual']).optional(),
+  specialInstructions: z.string().trim().max(500).optional(),
+  recurrence: RecurrenceBody.optional(),
+  ownerEmail: z.string().trim().max(200).optional(),
+  ...confirm,
+});
 
 /** GET /api/admin/reports: figures over the range (up to 92 days). */
 export const ReportQuery = inRange(92)(z.object({ from: isoTime, to: isoTime }));
@@ -851,9 +875,10 @@ Admin routes (04, Admin). `src/app/api/admin/assistant/route.ts` is in C.
  * request against the account store), the default rate limit, and clashes explained for Admin.
  */
 import { getGateway } from '../../../gateway';
-import { ConflictError } from '../../../gateway/ReservationGateway';
+import { ConflictError, type Requestor } from '../../../gateway/ReservationGateway';
 import { requireAdmin, type AdminActor } from '../../../lib/requestor';
 import { clash } from '../../../services/adminBookings';
+import { getStore } from '../../../store';
 import { crossOrigin, gatewayFailure, preparedFailure, rateLimited } from '../_http';
 
 export async function adminGuard(request: Request, write = false, bucket: 'default' | 'live' = 'default'): Promise<AdminActor | Response> {
@@ -864,6 +889,14 @@ export async function adminGuard(request: Request, write = false, bucket: 'defau
   const admin = await requireAdmin(request);
   if (admin instanceof Response) return admin;
   return rateLimited(admin.email, bucket) ?? admin;
+}
+
+/** The app's active accounts: the people Admin may book for (bulk booking) besides the tool's employee list. */
+export function accountPeople(): Requestor[] {
+  return getStore()
+    .accounts.list()
+    .filter((a) => !a.disabled)
+    .map((a) => ({ name: a.name, email: a.email, login: a.login, ...(a.division ? { division: a.division } : {}) }));
 }
 
 /** Like gatewayFailure, but a clash names who holds the room, or which other room the owner already has. */
@@ -897,6 +930,60 @@ export const GET = shared(async function get(request: Request): Promise<Response
     .audit.list()
     .filter((e) => (!from || e.at >= from) && (!to || e.at < to) && (!actor || e.actor.toLowerCase() === actor.toLowerCase()) && (!action || e.action === action));
   return Response.json({ ok: true, entries: entries.map(auditView) }, { headers: { 'Cache-Control': 'no-store' } });
+});
+```
+
+### `src/app/api/admin/blocks/route.ts`
+
+<!-- verbatim: src/app/api/admin/blocks/route.ts -->
+```ts
+/**
+ * POST /api/admin/blocks { roomIds, start, end, reason, cancel?, dryRun? } – Admin blocks rooms for a time
+ * (maintenance, an event): nobody else can book them then (status "Blocked"). `dryRun` lists the bookings in the way;
+ * those in `cancel` (Admin saw them) are cancelled and each owner gets a note, any other stops the block (409 names it).
+ * Admin lifts a block by cancelling it (POST /api/admin/bookings/{ticketNo} { action: "cancel" }).
+ */
+import { sameEmail } from '../../../../domain/people';
+import { getGateway } from '../../../../gateway';
+import { audit } from '../../../../lib/audit';
+import { now } from '../../../../lib/clock';
+import { prepareRoomBlock } from '../../../../services/adminBlocks';
+import { bookingLabel } from '../../../../services/adminBookings';
+import { adminNote } from '../../../../services/messages';
+import { adminBooking } from '../../../../services/views';
+import { getStore } from '../../../../store';
+import { parseBody, preparedFailure } from '../../_http';
+import { BlockBody } from '../../_schemas';
+import { shared } from '../../_shared';
+import { adminFailure, adminGuard } from '../_admin';
+
+export const runtime = 'nodejs';
+
+export const POST = shared(async function post(request: Request): Promise<Response> {
+  const admin = await adminGuard(request, true);
+  if (admin instanceof Response) return admin;
+  const body = await parseBody(request, BlockBody);
+  if (!body.ok) return body.response;
+  const gw = getGateway();
+  const t = now();
+  try {
+    const prepared = await prepareRoomBlock(gw, body.data, t);
+    if (!prepared.ok) return preparedFailure(prepared);
+    const { rooms, start, end, reason, affected } = prepared.value;
+    if (body.data.dryRun) return Response.json({ ok: true, affected: affected.map((b) => adminBooking(b, admin.email)) });
+    const { blocks, cancelled } = await gw.blockRooms({ roomIds: rooms.map((r) => r.id), start, end, reason }, admin, body.data.cancel);
+    const all = await gw.listRooms();
+    for (const b of blocks) audit(admin, 'booking.block', b.ticketNo, `${bookingLabel(b, all)} · ${reason}`);
+    for (const b of cancelled) {
+      audit(admin, 'booking.cancel', b.ticketNo, `For a room block: ${reason}`);
+      if (!sameEmail(b.owner.email, admin.email)) {
+        adminNote(getStore(), b, admin, `Admin blocked ${bookingLabel(b, all)} (${reason}), so this booking is cancelled. Please book another room or time.`, t);
+      }
+    }
+    return Response.json({ ok: true, blocks: blocks.map((b) => adminBooking(b, admin.email)), cancelled: cancelled.map((b) => adminBooking(b, admin.email)) });
+  } catch (error) {
+    return adminFailure(error, 'Admin block');
+  }
 });
 ```
 
@@ -936,7 +1023,7 @@ export const GET = shared(async function get(request: Request): Promise<Response
 ```ts
 /**
  * Admin acts on one booking (docs/spec/04-api.md, Admin; flows F30):
- *   POST  { action: approve | reject | cancel | checkin, comment? } – reject needs a reason
+ *   POST  { action: approve | reject | cancel | checkin, comment? } – reject needs a reason; cancel lifts a room block
  *   PATCH { roomId?, start?, end?, participants?, agenda?, agendaType?, priority? } – checked by prepareAdminChange
  * Every change is audited and leaves an automatic note in the booking's thread for its owner.
  */
@@ -974,8 +1061,14 @@ export const POST = shared(async function post(request: Request, { params }: Par
       return Response.json({ ok: true, booking: adminBooking(booking, admin.email) });
     }
     if (a.action === 'cancel') {
+      const block = (await gw.getBooking(ticketNo))?.status === 'Blocked';
       await gw.cancelBooking(ticketNo, admin, a.comment);
       const booking = await gw.getBooking(ticketNo);
+      if (block) {
+        // The room is free again. A block is nobody's booking, so no note goes into a thread.
+        audit(admin, 'booking.unblock', ticketNo, withNote(`${booking ? bookingLabel(booking, await gw.listRooms()) : ticketNo} · ${booking?.agenda ?? ''}`, a.comment));
+        return Response.json({ ok: true, booking: booking && adminBooking(booking, admin.email) });
+      }
       audit(admin, 'booking.cancel', ticketNo, withNote('by Admin.', a.comment));
       if (booking) adminNote(getStore(), booking, admin, withNote('Admin cancelled this booking.', a.comment), t);
       return Response.json({ ok: true, booking: booking && adminBooking(booking, admin.email) });
@@ -1051,6 +1144,67 @@ export const POST = shared(async function post(request: Request): Promise<Respon
     }
   }
   return Response.json({ ok: true, approved, failed });
+});
+```
+
+### `src/app/api/admin/bookings/bulk/route.ts`
+
+<!-- verbatim: src/app/api/admin/bookings/bulk/route.ts -->
+```ts
+/**
+ * POST /api/admin/bookings/bulk { roomIds, agendaType, agenda, start, end, participants, recurrence?, ownerEmail?,
+ * cancel?, dryRun? } – Admin books several rooms (each for every date of the repeat) in one go, Approved at once, for
+ * themself or a person with an account (or in the employee list). `dryRun` counts them and lists the bookings in the way; those in
+ * `cancel` (Admin saw them) are cancelled and each owner gets a note, any other stops it (409 names it).
+ */
+import type { Recurrence } from '../../../../../domain/recurrence';
+import { sameEmail } from '../../../../../domain/people';
+import { getGateway } from '../../../../../gateway';
+import { audit } from '../../../../../lib/audit';
+import { now } from '../../../../../lib/clock';
+import { prepareBulkBooking } from '../../../../../services/adminBlocks';
+import { bookingLabel } from '../../../../../services/adminBookings';
+import { adminNote } from '../../../../../services/messages';
+import { adminBooking } from '../../../../../services/views';
+import { getStore } from '../../../../../store';
+import { parseBody, preparedFailure } from '../../../_http';
+import { BulkBookingBody } from '../../../_schemas';
+import { shared } from '../../../_shared';
+import { accountPeople, adminFailure, adminGuard } from '../../_admin';
+
+export const runtime = 'nodejs';
+
+export const POST = shared(async function post(request: Request): Promise<Response> {
+  const admin = await adminGuard(request, true);
+  if (admin instanceof Response) return admin;
+  const body = await parseBody(request, BulkBookingBody);
+  if (!body.ok) return body.response;
+  const { cancel, dryRun, ownerEmail, ...fields } = body.data;
+  const recurrence = fields.recurrence as Recurrence | undefined;
+  const gw = getGateway();
+  const t = now();
+  try {
+    const prepared = await prepareBulkBooking(gw, { ...fields, recurrence, ownerEmail }, admin, t, accountPeople());
+    if (!prepared.ok) return preparedFailure(prepared);
+    const { rooms, dates, owner, affected } = prepared.value;
+    if (dryRun) return Response.json({ ok: true, count: rooms.length * dates.length, owner: owner.name, affected: affected.map((b) => adminBooking(b, admin.email)) });
+    const { created, cancelled } = await gw.bulkBook({ ...fields, recurrence, roomIds: rooms.map((r) => r.id), requester: owner }, admin, cancel);
+    const all = await gw.listRooms();
+    const forSomeoneElse = !sameEmail(owner.email, admin.email);
+    for (const b of created) {
+      audit(admin, 'booking.create', b.ticketNo, `${bookingLabel(b, all)} · bulk booking by Admin${forSomeoneElse ? ` for ${owner.name}` : ''}`);
+      if (forSomeoneElse) adminNote(getStore(), b, admin, `Admin booked this for you: ${bookingLabel(b, all)}.`, t);
+    }
+    for (const b of cancelled) {
+      audit(admin, 'booking.cancel', b.ticketNo, `For an Admin bulk booking: ${fields.agenda}`);
+      if (!sameEmail(b.owner.email, admin.email)) {
+        adminNote(getStore(), b, admin, `Admin needs ${bookingLabel(b, all)} for "${fields.agenda}", so this booking is cancelled. Please book another room or time.`, t);
+      }
+    }
+    return Response.json({ ok: true, created: created.map((b) => adminBooking(b, admin.email)), cancelled: cancelled.map((b) => adminBooking(b, admin.email)) });
+  } catch (error) {
+    return adminFailure(error, 'Admin bulk booking');
+  }
 });
 ```
 
@@ -1477,14 +1631,16 @@ export const GET = shared(async function get(request: Request): Promise<Response
 /**
  * GET /api/bookings – the Room Reservation Tool's reservation list with its search panel
  * (Guidelines step 2: reservation date, type of agenda, site, building, room, employee name) plus status.
- * Every status, including Cancelled and Completed, like the tool. Privacy-filtered: the Type of Agenda
+ * Every status, including Cancelled and Completed, like the tool; without dates every booking, past and future.
+ * Privacy-filtered: the Type of Agenda
  * filter matches your own bookings by type and other people's by whether their room takes that type, so it
  * never reveals their category (docs/spec/04-api.md).
  */
 import { sameEmail } from '../../../domain/people';
+import { ALL_TIME } from '../../../domain/time';
 import { getGateway } from '../../../gateway';
 import { requireRequestor } from '../../../lib/requestor';
-import { publicBooking } from '../../../services/views';
+import { publicBooking, shownOwner } from '../../../services/views';
 import { gatewayFailure, parseQuery, rateLimited } from '../_http';
 import { BookingsQuery } from '../_schemas';
 import { shared } from '../_shared';
@@ -1504,9 +1660,9 @@ export const GET = shared(async function get(request: Request): Promise<Response
     const rooms = (await gw.listRooms(site)).filter((r) => (!building || r.building === building) && (!roomId || r.id === roomId));
     const byId = new Map(rooms.map((r) => [r.id, r] as const));
     const name = employee?.toLowerCase();
-    const bookings = (await gw.getBookings({ roomIds: [...byId.keys()], from, to }))
+    const bookings = (await gw.getBookings({ roomIds: [...byId.keys()], from: from ?? ALL_TIME.start, to: to ?? ALL_TIME.end }))
       .filter((b) => !status || b.status === status)
-      .filter((b) => !name || b.owner.name.toLowerCase().includes(name))
+      .filter((b) => !name || shownOwner(b).toLowerCase().includes(name))
       .filter((b) => {
         if (!agendaType) return true;
         if (sameEmail(b.owner.email, user.email)) return b.agendaType === agendaType;
@@ -2785,7 +2941,8 @@ export const SAME_FLOOR_BONUS = 5;
  */
 export function swapOptionsFor(blocking: Booking, rooms: Room[], bookings: Booking[], now: Date, limit = 3): Scored[] {
   const current = rooms.find((r) => r.id === blocking.roomId);
-  if (!current) return [];
+  // Admin's room block is not a booking anyone could move out of.
+  if (!current || blocking.status === 'Blocked') return [];
   const ownerNeeds: RoomRequest = {
     site: current.site,
     agendaType: blocking.agendaType,
@@ -2821,7 +2978,7 @@ export function isBlocking(b: Booking, now: Date): boolean {
     case 'Held':
       return !!b.holdExpiresAt && b.holdExpiresAt.getTime() > now.getTime();
     default:
-      return true; // In Progress, Approved, Checked-In
+      return true; // In Progress, Approved, Checked-In, Blocked
   }
 }
 
@@ -2839,11 +2996,12 @@ export function conflictsFor(roomId: string, want: Interval, bookings: Booking[]
 /**
  * The person's own bookings (any room) that overlap `want` and still hold their room (RULES.oneRoomPerPersonAtATime).
  * Training and Multi-purpose bookings may be held several at once: they neither clash nor count (countsForOneRoom).
+ * Admin's room blocks never count either.
  */
 export function ownConflicts(email: string, want: Interval & { agendaType: AgendaType }, bookings: Booking[], now: Date): Booking[] {
   if (!countsForOneRoom(want.agendaType)) return [];
   return bookings
-    .filter((b) => countsForOneRoom(b.agendaType) && sameEmail(b.owner.email, email) && isBlocking(b, now) && overlaps(want, b))
+    .filter((b) => b.status !== 'Blocked' && countsForOneRoom(b.agendaType) && sameEmail(b.owner.email, email) && isBlocking(b, now) && overlaps(want, b))
     .sort((x, y) => x.start.getTime() - y.start.getTime());
 }
 
@@ -2909,6 +3067,22 @@ export function nearestFreeSlots(
 /** Emails identify people across the app (demo user now, Entra ID in Phase 3). Case never matters. */
 export function sameEmail(a: string | undefined, b: string | undefined): boolean {
   return !!a && !!b && a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * The people whose name has every word of `query` as the start of one of its words (any case or order, commas
+ * ignored): "lili", "Lili Lagunoy" and "Lagunoy, Lili" all find "Lagunoy, Lili". An e-mail address finds its person.
+ */
+export function matchPeople<P extends { name: string; email?: string }>(people: readonly P[], query: string): P[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const byEmail = people.filter((p) => sameEmail(p.email, q));
+  if (byEmail.length > 0) return byEmail;
+  const words = q.split(/[\s,]+/).filter(Boolean);
+  return people.filter((p) => {
+    const name = p.name.toLowerCase().split(/[\s,.]+/).filter(Boolean);
+    return words.every((w) => name.some((n) => n.startsWith(w)));
+  });
 }
 ```
 
@@ -3170,7 +3344,8 @@ function tally<T>(items: T[], key: (item: T) => string, hours: (item: T) => numb
 
 export function buildReport(input: { bookings: Booking[]; rooms: Room[]; from: Date; to: Date; now: Date }): Report {
   const { rooms, from, to, now } = input;
-  const inRange = input.bookings.filter((b) => b.start < to && from < b.end);
+  // Admin's room blocks are not use of a room: they stay out of every figure.
+  const inRange = input.bookings.filter((b) => b.status !== 'Blocked' && b.start < to && from < b.end);
   const used = inRange.filter(usesRoom);
   const hoursIn = (b: Booking) => (Math.min(b.end.getTime(), to.getTime()) - Math.max(b.start.getTime(), from.getTime())) / HOUR_MS;
   // Released for no check-in, or due and not released yet.
@@ -3571,6 +3746,9 @@ export function shouldAutoRelease(b: Booking, now: Date): boolean {
  * Time helpers. Store and compare UTC Date objects; show Asia/Manila (UTC+8 all year, no daylight saving).
  */
 export const MANILA_TZ = 'Asia/Manila';
+
+/** The earliest and latest instants a Date can hold: as a range, every booking, past and future. */
+export const ALL_TIME = { start: new Date(-8.64e15), end: new Date(8.64e15) };
 const MINUTE_MS = 60 * 1000;
 const MANILA_OFFSET_MS = 8 * 60 * MINUTE_MS;
 
@@ -3690,8 +3868,12 @@ export interface Room {
 /** What a signed-in account may do: `admin` runs the Admin pages (/admin); everyone books as themselves. */
 export type Role = 'admin' | 'user';
 
-/** Statuses used by the current tool, plus "Held" for short-lived assistant proposals. */
-export type BookingStatus = 'Held' | 'In Progress' | 'Approved' | 'Checked-In' | 'Completed' | 'Cancelled';
+/**
+ * Statuses used by the current tool, plus "Held" for short-lived assistant proposals and "Blocked" (ours, 1 Oct 2026):
+ * Admin blocked the room for that time (maintenance, an event). A block holds its room like a booking; its agenda is the
+ * reason and its owner the Admin who blocked it.
+ */
+export type BookingStatus = 'Held' | 'In Progress' | 'Approved' | 'Checked-In' | 'Completed' | 'Cancelled' | 'Blocked';
 
 export interface Person {
   /** "Last, First", like the current tool. */
@@ -3875,7 +4057,7 @@ interface RawScenario {
   }>;
 }
 
-const STATUSES: readonly BookingStatus[] = ['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled'];
+const STATUSES: readonly BookingStatus[] = ['Held', 'In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled', 'Blocked'];
 const AGENDA_TYPES: readonly AgendaType[] = ['Meeting', 'Training', 'Pantry', 'Lactation Room', 'Multi-purpose'];
 
 function toDate(value: string, where: string): Date {
@@ -3984,6 +4166,19 @@ export interface NewBooking {
   recurrence?: Recurrence;
 }
 
+/** Admin blocks rooms for a time (maintenance, an event): see blockRooms. */
+export interface RoomBlock {
+  roomIds: string[];
+  start: Date;
+  end: Date;
+  reason: string;
+}
+
+/** Admin books several rooms at once, each for every date of the recurrence, for `requester`: see bulkBook. */
+export interface BulkBooking extends Omit<NewBooking, 'roomId'> {
+  roomIds: string[];
+}
+
 export class ConflictError extends Error {
   readonly conflicts: Booking[];
   /** 'room': someone holds the room; 'requester': the requester already has another room then (RULES.oneRoomPerPersonAtATime). */
@@ -4001,6 +4196,11 @@ export class NotAllowedError extends Error {
     super(message);
     this.name = 'NotAllowedError';
   }
+}
+
+/** Why a room block can't be changed, moved or swapped: Admin lifts it (cancelBooking) and blocks again. */
+export function blockIsFixed(b: Pick<Booking, 'ticketNo'>): string {
+  return `${b.ticketNo} is a room block: lift it, then block the room again for the new time.`;
 }
 
 export class NotFoundError extends Error {
@@ -4084,6 +4284,18 @@ export interface ReservationGateway {
   swapRooms(ticketA: string, ticketB: string, by: Actor): Promise<[Booking, Booking]>;
   /** Admin: changes a room's details. */
   updateRoom(roomId: string, changes: RoomChanges, by: Actor): Promise<Room>;
+  /**
+   * Admin: blocks each room for the time ("Blocked": it holds the room, so nobody else can book it then). The bookings
+   * already there are cancelled first if they are in `cancel` (the tickets Admin saw and agreed to cancel); any other
+   * stops it (ConflictError lists them), and so does another block (NotAllowedError: lift it first). All or none.
+   */
+  blockRooms(block: RoomBlock, by: Actor, cancel: readonly string[]): Promise<{ blocks: Booking[]; cancelled: Booking[] }>;
+  /**
+   * Admin: books every room, for every date of the recurrence, Approved at once; each room must take the type of agenda
+   * and the group, and one person may hold all of them. The bookings already there are cancelled first if they are in
+   * `cancel`, as for blockRooms. All or none.
+   */
+  bulkBook(req: BulkBooking, by: Actor, cancel: readonly string[]): Promise<{ created: Booking[]; cancelled: Booking[] }>;
 }
 ```
 
@@ -4134,18 +4346,21 @@ import { expandRecurrence } from '../domain/recurrence';
 import { bookable } from '../domain/ranking';
 import { checkInWindow, initialStatus, placementChanged, roomIssues, RULES, shouldAutoRelease } from '../domain/rules';
 import { addMinutes, formatManila, manilaStartOfDay } from '../domain/time';
-import type { AgendaType, Booking, Person, Room, Site } from '../domain/types';
+import type { AgendaType, Booking, Interval, Person, Room, Site } from '../domain/types';
 import { ROOMS } from '../data/rooms';
 import type { Scenario } from '../data/scenarios';
 import {
+  blockIsFixed,
   ConflictError,
   NotAllowedError,
   NotFoundError,
   type Actor,
   type BookingChanges,
+  type BulkBooking,
   type NewBooking,
   type ReservationGateway,
   type Requestor,
+  type RoomBlock,
   type RoomChanges,
 } from './ReservationGateway';
 
@@ -4233,8 +4448,9 @@ export class MockGateway implements ReservationGateway {
   }
 
   async listMyBookings(email: string, from: Date, to?: Date): Promise<Booking[]> {
+    // Admin's room blocks are on the Admin pages, not in anyone's own bookings.
     return this.bookings
-      .filter((b) => sameEmail(b.owner.email, email) && (!to || b.start < to) && from < b.end)
+      .filter((b) => b.status !== 'Blocked' && sameEmail(b.owner.email, email) && (!to || b.start < to) && from < b.end)
       .sort((x, y) => x.start.getTime() - y.start.getTime())
       .map(clone);
   }
@@ -4312,6 +4528,7 @@ export class MockGateway implements ReservationGateway {
   async moveBooking(ticketNo: string, toRoomId: string, _by: Actor): Promise<Booking> {
     // In the real tool the owner must agree (or make the change). The mock trusts the caller.
     const b = this.mustFind(ticketNo);
+    if (b.status === 'Blocked') throw new NotAllowedError(blockIsFixed(b));
     if (!this.rooms.some((r) => r.id === toRoomId)) throw new NotFoundError(`Unknown room "${toRoomId}".`);
     const others = this.bookings.filter((x) => x !== b);
     const conflicts = conflictsFor(toRoomId, b, others, this.now());
@@ -4398,6 +4615,93 @@ export class MockGateway implements ReservationGateway {
     return { ...r };
   }
 
+  async blockRooms(block: RoomBlock, by: Actor, cancel: readonly string[]): Promise<{ blocks: Booking[]; cancelled: Booking[] }> {
+    assertAdmin(by);
+    if (block.end.getTime() <= block.start.getTime()) throw new NotAllowedError('The end must be after the start.');
+    const rooms = this.mustRooms(block.roomIds);
+    const slots = rooms.map((room) => ({ roomId: room.id, start: block.start, end: block.end }));
+    const cancelled = this.clearSlots(slots, by, cancel, `Cancelled by Admin: the room is blocked (${block.reason}).`);
+    const blocks: Booking[] = rooms.map((room) => ({
+      ticketNo: `RM-0${this.nextTicket++}`,
+      roomId: room.id,
+      start: new Date(block.start.getTime()),
+      end: new Date(block.end.getTime()),
+      status: 'Blocked',
+      agenda: block.reason,
+      agendaType: room.agendas[0] ?? 'Meeting',
+      participants: 0,
+      owner: personOf(by),
+      priority: 'Normal',
+      createdBy: by.login ?? toolLogin(by),
+      createdAt: this.now(),
+    }));
+    this.bookings.push(...blocks);
+    return { blocks: blocks.map(clone), cancelled: cancelled.map(clone) };
+  }
+
+  async bulkBook(req: BulkBooking, by: Actor, cancel: readonly string[]): Promise<{ created: Booking[]; cancelled: Booking[] }> {
+    assertAdmin(by);
+    const rooms = this.mustRooms(req.roomIds);
+    for (const room of rooms) {
+      const [wrong] = roomIssues(room, req.agendaType, req.participants);
+      if (wrong) throw new NotAllowedError(wrong.message);
+    }
+    const dates = req.recurrence ? expandRecurrence(req, req.recurrence) : [{ start: req.start, end: req.end }];
+    const slots = rooms.flatMap((room) => dates.map((d) => ({ roomId: room.id, start: d.start, end: d.end })));
+    const cancelled = this.clearSlots(slots, by, cancel, `Cancelled by Admin: the room is needed for "${req.agenda}".`);
+    const trainingType = req.agendaType === 'Training' ? (req.trainingType ?? 'On-Site') : undefined;
+    const created: Booking[] = slots.map((s) => ({
+      ticketNo: `RM-0${this.nextTicket++}`,
+      roomId: s.roomId,
+      start: new Date(s.start.getTime()),
+      end: new Date(s.end.getTime()),
+      status: 'Approved', // Admin made them: nothing waits for Admin
+      agenda: req.agenda,
+      agendaType: req.agendaType,
+      participants: req.participants,
+      owner: { ...req.requester },
+      priority: req.priority ?? 'Normal',
+      ...(trainingType ? { trainingType } : {}),
+      ...(req.specialInstructions ? { specialInstructions: req.specialInstructions } : {}),
+      ...(req.hardwareRequirements?.length ? { hardwareRequirements: [...req.hardwareRequirements] } : {}),
+      ...(req.recurrence ? { recurrence: { ...req.recurrence } } : {}),
+      createdBy: by.login ?? toolLogin(by),
+      createdAt: this.now(),
+    }));
+    this.bookings.push(...created);
+    return { created: created.map(clone), cancelled: cancelled.map(clone) };
+  }
+
+  /** The rooms by id (each once), or NotFoundError before anything changes. */
+  private mustRooms(ids: string[]): Room[] {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) throw new NotAllowedError('Pick at least one room.');
+    return unique.map((id) => {
+      const room = this.rooms.find((r) => r.id === id);
+      if (!room) throw new NotFoundError(`Unknown room "${id}".`);
+      return room;
+    });
+  }
+
+  /**
+   * The bookings that hold these slots, for Admin's block or bulk booking: those in `cancel` (Admin saw them) are
+   * cancelled, `comment` telling their owners why; any other stops it (ConflictError, nothing changed).
+   */
+  private clearSlots(slots: Array<{ roomId: string } & Interval>, by: Actor, cancel: readonly string[], comment: string): Booking[] {
+    const now = this.now();
+    const hit = [...new Set(slots.flatMap((s) => conflictsFor(s.roomId, s, this.bookings, now)))];
+    // Another block is never cancelled this way: Admin lifts it first.
+    const block = hit.find((b) => b.status === 'Blocked');
+    if (block) throw new NotAllowedError(`${block.ticketNo} already blocks that room then (${block.agenda}). Lift that block first.`);
+    const unseen = hit.filter((b) => !cancel.includes(b.ticketNo));
+    if (unseen.length > 0) throw new ConflictError(unseen.map(clone));
+    for (const b of hit) {
+      b.status = 'Cancelled';
+      this.markAdmin(b, by, comment);
+    }
+    return hit;
+  }
+
   /** The room is free for `next` and, when its time or type changed, its owner holds no other room then (one room per person). */
   private assertFits(next: Booking, others: Booking[], recheckOwner: boolean): void {
     const conflicts = conflictsFor(next.roomId, next, others, this.now());
@@ -4440,9 +4744,10 @@ function defined<T extends object>(changes: T): Partial<T> {
   return Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
 
-/** A cancelled or completed booking can't be changed any more. */
+/** A cancelled or completed booking can't be changed any more, and a room block is only lifted. */
 function assertOpen(b: Booking): void {
   if (b.status === 'Cancelled' || b.status === 'Completed') throw new NotAllowedError(`${b.ticketNo} is ${b.status}.`);
+  if (b.status === 'Blocked') throw new NotAllowedError(blockIsFixed(b));
 }
 
 function clone(b: Booking): Booking {
@@ -4462,6 +4767,11 @@ function clone(b: Booking): Booking {
 /** Mock stand-in for the tool's "Created By" login (upper-case e-mail name). The real value comes from the tool. */
 function toolLogin(p: Person): string | undefined {
   return p.email?.split('@')[0]?.toUpperCase();
+}
+
+/** The Admin who blocks a room, as the block's owner (no login or role). */
+function personOf(by: Actor): Person {
+  return { name: by.name, ...(by.email ? { email: by.email } : {}), ...(by.division ? { division: by.division } : {}) };
 }
 
 /** Small deterministic random generator, so random demo data is the same on every start. */
@@ -4996,6 +5306,8 @@ export type AuditAction =
   | 'booking.reject'
   | 'booking.update'
   | 'booking.swap'
+  | 'booking.block'
+  | 'booking.unblock'
   | 'user.create'
   | 'user.update'
   | 'user.reset'
@@ -5203,6 +5515,152 @@ export class MemoryStore implements AppStore {
 
 ## src/services/
 
+### `src/services/adminBlocks.ts`
+
+<!-- verbatim: src/services/adminBlocks.ts -->
+```ts
+/**
+ * Admin's room blocks and bulk bookings (docs/spec/02-flows.md F35, F36): check them before the gateway writes, and
+ * list the bookings they would cancel, so Admin sees who is affected before pressing the button (the owner's request,
+ * 1 Oct 2026). The gateway checks the rooms and the clashes again when Admin confirms.
+ */
+import { conflictsFor } from '../domain/availability';
+import { sameEmail } from '../domain/people';
+import { expandRecurrence, type Recurrence } from '../domain/recurrence';
+import { ISSUE_FIELD, RULES, validateRequest, type Issue } from '../domain/rules';
+import type { AgendaType, Booking, Interval, Priority, Room, TrainingType } from '../domain/types';
+import type { ReservationGateway, Requestor } from '../gateway/ReservationGateway';
+import { bookingLabel } from './adminBookings';
+import type { Prepared } from './prepareBooking';
+
+type Failed = Extract<Prepared<never>, { ok: false }>;
+
+/** Our own limits for one block or bulk booking: rooms in it, bookings it makes, days a block lasts. */
+export const BULK_LIMITS = { rooms: 30, bookings: 100, blockDays: 92 };
+
+const DAY_MS = 24 * 3_600_000;
+
+export interface BlockPlan {
+  rooms: Room[];
+  start: Date;
+  end: Date;
+  reason: string;
+  /** The bookings the block would cancel, soonest first. */
+  affected: Booking[];
+}
+
+export async function prepareRoomBlock(gw: ReservationGateway, input: { roomIds: string[]; start: Date; end: Date; reason: string }, now: Date): Promise<Prepared<BlockPlan>> {
+  const reason = input.reason.trim();
+  if (!reason) return { ok: false, code: 'INVALID', problems: ['Add the reason, for example "Aircon maintenance".'] };
+  const rooms = await pickRooms(gw, input.roomIds);
+  if (!rooms.ok) return rooms;
+  const { start, end } = input;
+  if (end.getTime() <= start.getTime()) return { ok: false, code: 'INVALID', problems: ['The end must be after the start.'], fields: ['time'] };
+  if (start.getTime() < now.getTime() - RULES.startGraceMinutes * 60_000) return { ok: false, code: 'INVALID', problems: ['That time has already started: block from now on.'], fields: ['time'] };
+  if (end.getTime() - start.getTime() > BULK_LIMITS.blockDays * DAY_MS) return { ok: false, code: 'INVALID', problems: [`A block can last up to ${BULK_LIMITS.blockDays} days.`], fields: ['time'] };
+  const held = await holdersOf(gw, rooms.value.map((r) => ({ roomId: r.id, start, end })), now, rooms.value);
+  if (!held.ok) return held;
+  return { ok: true, value: { rooms: rooms.value, start, end, reason, affected: held.value } };
+}
+
+export interface BulkInput {
+  roomIds: string[];
+  start: Date;
+  end: Date;
+  recurrence?: Recurrence;
+  agenda: string;
+  agendaType: AgendaType;
+  participants: number;
+  /** Who it is for: someone with an account or in the tool's employee list (bookablePeople); none = the signed-in Admin. */
+  ownerEmail?: string;
+  priority?: Priority;
+  trainingType?: TrainingType;
+  specialInstructions?: string;
+}
+
+export interface BulkPlan {
+  rooms: Room[];
+  /** Every date (one interval each); one booking per room per date. */
+  dates: Interval[];
+  owner: Requestor;
+  /** The bookings the bulk booking would cancel, soonest first. */
+  affected: Booking[];
+}
+
+/** `people`: the app's active accounts, who may be booked for besides the tool's employee list. */
+export async function prepareBulkBooking(gw: ReservationGateway, input: BulkInput, admin: Requestor, now: Date, people: readonly Requestor[] = []): Promise<Prepared<BulkPlan>> {
+  const rooms = await pickRooms(gw, input.roomIds);
+  if (!rooms.ok) return rooms;
+  let owner = admin;
+  if (input.ownerEmail && !sameEmail(input.ownerEmail, admin.email)) {
+    const found = (await bookablePeople(gw, people)).find((p) => sameEmail(p.email, input.ownerEmail));
+    if (!found) return { ok: false, code: 'NOT_FOUND', problems: [`${input.ownerEmail} has no account and is not in the employee list.`] };
+    owner = found;
+  }
+  // Each room's rules as for an Admin change: the booking window, Admin-only rooms and the Urgent hint may be set aside.
+  const req = { start: input.start, end: input.end, agendaType: input.agendaType, participants: input.participants, agenda: input.agenda };
+  const issues = rooms.value.flatMap((room) =>
+    validateRequest({ ...req, site: room.site }, now, { forBooking: true, room, priority: input.priority }).filter((i) => i.blocking && !RULES.adminMayOverride.includes(i.code)),
+  );
+  if (issues.length > 0) return invalid(issues);
+  const dates = input.recurrence ? expandRecurrence(req, input.recurrence, RULES.maxSeriesDates + 1) : [{ start: input.start, end: input.end }];
+  if (dates.length === 0) return { ok: false, code: 'INVALID', problems: ['The repeat pattern gives no dates before the end date.'], fields: ['recurrence'] };
+  if (dates.length > RULES.maxSeriesDates) return { ok: false, code: 'INVALID', problems: [`A repeating booking can have at most ${RULES.maxSeriesDates} dates.`], fields: ['recurrence'] };
+  const count = rooms.value.length * dates.length;
+  if (count > BULK_LIMITS.bookings) {
+    return { ok: false, code: 'INVALID', problems: [`That is ${count} bookings (${rooms.value.length} rooms × ${dates.length} dates); one bulk booking makes up to ${BULK_LIMITS.bookings}.`], fields: ['room', 'recurrence'] };
+  }
+  const held = await holdersOf(gw, rooms.value.flatMap((r) => dates.map((d) => ({ roomId: r.id, ...d }))), now, rooms.value);
+  if (!held.ok) return held;
+  return { ok: true, value: { rooms: rooms.value, dates, owner, affected: held.value } };
+}
+
+/** Who Admin may book for: the app's accounts (`accounts`) and the tool's employee list, each person once. */
+export async function bookablePeople(gw: ReservationGateway, accounts: readonly Requestor[]): Promise<Requestor[]> {
+  const all = [...accounts, ...(await gw.listPeople())];
+  return all.filter((p, i) => all.findIndex((q) => sameEmail(q.email, p.email)) === i);
+}
+
+/** The rooms by id, each once: INVALID for none or too many, NOT_FOUND for an unknown one. */
+async function pickRooms(gw: ReservationGateway, ids: string[]): Promise<Prepared<Room[]>> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return { ok: false, code: 'INVALID', problems: ['Pick at least one room.'], fields: ['room'] };
+  if (unique.length > BULK_LIMITS.rooms) return { ok: false, code: 'INVALID', problems: [`Pick up to ${BULK_LIMITS.rooms} rooms at a time.`], fields: ['room'] };
+  const all = await gw.listRooms();
+  const rooms: Room[] = [];
+  for (const id of unique) {
+    const room = all.find((r) => r.id === id);
+    if (!room) return { ok: false, code: 'NOT_FOUND', problems: [`Unknown room "${id}".`], fields: ['room'] };
+    rooms.push(room);
+  }
+  return { ok: true, value: rooms };
+}
+
+/**
+ * The bookings holding any of these slots now (what a block or bulk booking would cancel), soonest first. A room block
+ * in the way stops it instead (NOT_ALLOWED): overriding cancels people's bookings, never another block.
+ */
+async function holdersOf(gw: ReservationGateway, slots: Array<{ roomId: string } & Interval>, now: Date, rooms: Room[]): Promise<Prepared<Booking[]>> {
+  if (slots.length === 0) return { ok: true, value: [] };
+  const from = new Date(Math.min(...slots.map((s) => s.start.getTime())));
+  const to = new Date(Math.max(...slots.map((s) => s.end.getTime())));
+  const bookings = await gw.getBookings({ roomIds: [...new Set(slots.map((s) => s.roomId))], from, to });
+  const hit = new Map<string, Booking>();
+  for (const s of slots) for (const b of conflictsFor(s.roomId, s, bookings, now)) hit.set(b.ticketNo, b);
+  const sorted = [...hit.values()].sort((a, b) => a.start.getTime() - b.start.getTime() || a.roomId.localeCompare(b.roomId));
+  const blocks = sorted.filter((b) => b.status === 'Blocked');
+  if (blocks.length > 0) {
+    const lines = blocks.slice(0, 5).map((b) => `Admin already blocked ${bookingLabel(b, rooms)}: ${b.agenda} (${b.ticketNo}).`);
+    return { ok: false, code: 'NOT_ALLOWED', problems: [...lines, 'Lift that block first (Admin › Bookings, status Blocked), then try again.'], fields: ['room', 'time'] };
+  }
+  return { ok: true, value: sorted };
+}
+
+function invalid(issues: Issue[]): Failed {
+  return { ok: false, code: 'INVALID', problems: [...new Set(issues.map((i) => i.message))], fields: [...new Set(issues.map((i) => ISSUE_FIELD[i.code]))] };
+}
+```
+
 ### `src/services/adminBookings.ts`
 
 <!-- verbatim: src/services/adminBookings.ts -->
@@ -5215,7 +5673,7 @@ import { conflictsFor, ownConflicts } from '../domain/availability';
 import { adminChangeIssues, checkInWindow, ISSUE_FIELD, roomIssues, RULES } from '../domain/rules';
 import { formatManila, formatRange } from '../domain/time';
 import type { Booking, Room } from '../domain/types';
-import type { BookingChanges, ReservationGateway } from '../gateway/ReservationGateway';
+import { blockIsFixed, type BookingChanges, type ReservationGateway } from '../gateway/ReservationGateway';
 import type { Prepared } from './prepareBooking';
 
 type Failed = Extract<Prepared<never>, { ok: false }>;
@@ -5250,7 +5708,9 @@ export function describeChange(before: Booking, after: Booking, rooms: Room[]): 
  */
 export function clash(kind: 'room' | 'requester', conflicts: Booking[], rooms: Room[]): Failed {
   const head = kind === 'requester' ? 'The owner already has another room then (one room per person at a time).' : 'The room is taken then.';
-  const lines = conflicts.slice(0, 5).map((c) => `${c.owner.name} has ${bookingLabel(c, rooms)} (${c.ticketNo}).`);
+  const lines = conflicts
+    .slice(0, 5)
+    .map((c) => (c.status === 'Blocked' ? `Admin blocked ${bookingLabel(c, rooms)}: ${c.agenda} (${c.ticketNo}).` : `${c.owner.name} has ${bookingLabel(c, rooms)} (${c.ticketNo}).`));
   return { ok: false, code: 'CONFLICT', problems: [[head, lines[0]].filter(Boolean).join(' '), ...lines.slice(1)], fields: kind === 'requester' ? ['time'] : ['room', 'time'] };
 }
 
@@ -5275,7 +5735,7 @@ async function fits(gw: ReservationGateway, next: Booking, except: Booking[], ro
 /**
  * Checks an Admin change against the rules (adminChangeIssues) and for clashes before the gateway (which checks the
  * clashes again) writes it. Fails INVALID (with the form fields to mark), NOT_FOUND, CONFLICT, or NOT_ALLOWED for a
- * cancelled or completed booking.
+ * cancelled or completed booking, or a room block (lifted, never changed).
  */
 export async function prepareAdminChange(
   gw: ReservationGateway,
@@ -5286,6 +5746,7 @@ export async function prepareAdminChange(
   const before = await gw.getBooking(ticketNo);
   if (!before) return { ok: false, code: 'NOT_FOUND', problems: [`Booking ${ticketNo} not found.`] };
   if (before.status === 'Cancelled' || before.status === 'Completed') return { ok: false, code: 'NOT_ALLOWED', problems: [`${ticketNo} is ${before.status}.`] };
+  if (before.status === 'Blocked') return { ok: false, code: 'NOT_ALLOWED', problems: [blockIsFixed(before)] };
   const set = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined)) as BookingChanges;
   const after: Booking = { ...before, ...set };
   const rooms = await gw.listRooms();
@@ -5306,7 +5767,10 @@ export async function prepareAdminSwap(gw: ReservationGateway, ticketA: string, 
   const [a, b] = await Promise.all([gw.getBooking(ticketA), gw.getBooking(ticketB)]);
   if (!a || !b) return { ok: false, code: 'NOT_FOUND', problems: [`Booking ${!a ? ticketA : ticketB} not found.`] };
   if (a.ticketNo === b.ticketNo) return { ok: false, code: 'INVALID', problems: ['Pick two different bookings.'] };
-  for (const x of [a, b]) if (x.status === 'Cancelled' || x.status === 'Completed') return { ok: false, code: 'NOT_ALLOWED', problems: [`${x.ticketNo} is ${x.status}.`] };
+  for (const x of [a, b]) {
+    if (x.status === 'Cancelled' || x.status === 'Completed') return { ok: false, code: 'NOT_ALLOWED', problems: [`${x.ticketNo} is ${x.status}.`] };
+    if (x.status === 'Blocked') return { ok: false, code: 'NOT_ALLOWED', problems: [blockIsFixed(x)] };
+  }
   if (a.roomId === b.roomId) return { ok: false, code: 'INVALID', problems: ['Both bookings are in the same room.'] };
   const rooms = await gw.listRooms();
   // Each must suit the other's room: its Types of agenda and capacity (the owner's room booking list).
@@ -5517,7 +5981,7 @@ export async function prepareBooking(
   const bookings = await gw.getBookings({ roomIds: [room.id], from: (dates[0] as Interval).start, to: last.end });
   const clashes = dates.flatMap((d) => {
     const a = availabilityFor(room.id, d, bookings, now);
-    return a.kind === 'available' ? [] : [`${dateLabel(d.start)}: taken by ${a.conflicts.map((b) => b.owner.name).join(', ')}`];
+    return a.kind === 'available' ? [] : [`${dateLabel(d.start)}: taken by ${a.conflicts.map((b) => (b.status === 'Blocked' ? 'Admin (room blocked)' : b.owner.name)).join(', ')}`];
   });
   if (clashes.length > 0) {
     const problems = draft.recurrence ? [`${room.name} is not free on ${clashes.length} of ${dates.length} dates.`, ...clashes.slice(0, 5)] : [`${room.name} is no longer free for that whole time.`];
@@ -6039,21 +6503,25 @@ function formFields(b: Booking) {
   };
 }
 
+/** Admin's room block is nobody's booking: people see that Admin blocked the room, not who did it or why. */
+export const shownOwner = (b: Booking) => (b.status === 'Blocked' ? 'Admin' : b.owner.name);
+
 /**
  * A booking as another person may see it: owner name, division, time, group size and status.
  * The viewer's own bookings also carry the rest of the tool's fields (agenda, category, priority, training type,
  * special instructions, hardware, recurrence, created by/at, modified by, admin comments) and `mine: true`. Never emails.
  */
 export function publicBooking(b: Booking, viewerEmail: string) {
-  const mine = sameEmail(b.owner.email, viewerEmail);
+  const block = b.status === 'Blocked';
+  const mine = !block && sameEmail(b.owner.email, viewerEmail);
   return {
     ticketNo: b.ticketNo,
     roomId: b.roomId,
     start: iso(b.start),
     end: iso(b.end),
     status: b.status,
-    owner: b.owner.name,
-    division: b.owner.division ?? null,
+    owner: shownOwner(b),
+    division: block ? null : (b.owner.division ?? null),
     participants: b.participants,
     mine,
     ...(mine ? formFields(b) : {}),
@@ -6063,7 +6531,7 @@ export type PublicBooking = ReturnType<typeof publicBooking>;
 
 /** A booking as Admin sees it, only in /api/admin/* responses: every field of the tool and the owner's e-mail. */
 export function adminBooking(b: Booking, viewerEmail: string) {
-  return { ...publicBooking(b, viewerEmail), ...formFields(b), ownerEmail: b.owner.email ?? null };
+  return { ...publicBooking(b, viewerEmail), owner: b.owner.name, division: b.owner.division ?? null, ...formFields(b), ownerEmail: b.owner.email ?? null };
 }
 export type AdminBooking = ReturnType<typeof adminBooking>;
 
@@ -6084,11 +6552,11 @@ function resultView(m: RoomMatch, viewerEmail: string, rank?: number): RoomResul
             ticketNo: b.ticketNo,
             start: iso(b.start),
             end: iso(b.end),
-            owner: b.owner.name,
-            division: b.owner.division,
+            owner: shownOwner(b),
+            division: b.status === 'Blocked' ? undefined : b.owner.division,
             participants: b.participants,
             status: b.status,
-            mine: sameEmail(b.owner.email, viewerEmail),
+            mine: b.status !== 'Blocked' && sameEmail(b.owner.email, viewerEmail),
           })),
   };
 }
@@ -7666,18 +8134,19 @@ function BookingActions({ b, room, onDetails }: { b: PublicBooking; room: RoomVi
   );
 }
 
-const BOOKING_STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Cancelled', 'Completed'] as const;
+const BOOKING_STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Cancelled', 'Completed', 'Blocked'] as const;
 const dayStart = (ymd: string) => new Date(`${ymd}T00:00:00+08:00`);
 const addDaysYmd = (ymd: string, n: number) => fmtToolDate(addMinutes(dayStart(ymd), n * 24 * 60));
 
 /**
  * The Room Reservation Tool's reservation list (GET /api/bookings): its search panel (reservation date from–to,
  * type of agenda, site, building, room, employee name) plus status, and its columns in its order.
- * Dates follow the map's day until you change them.
+ * Every booking, past and future, until a date is picked.
  */
 function BookingsTable() {
   const map = useMapData();
-  const [range, setRange] = useState<{ from: string; to: string } | null>(null);
+  // '' = open on that side (the owner's request, 1 Oct 2026).
+  const [range, setRange] = useState({ from: '', to: '' });
   const [agendaType, setAgendaType] = useState<AgendaType | ''>('');
   const [roomId, setRoomId] = useState('');
   const [employee, setEmployee] = useState('');
@@ -7688,13 +8157,11 @@ function BookingsTable() {
   const [sort, setSort] = useState<Sort<BookingKey>>({ key: 'start', dir: 'asc' });
   const [details, setDetails] = useState<PublicBooking | null>(null);
 
-  const mapDay = fmtToolDate(map.slot.start);
-  const from = range?.from ?? mapDay;
-  const to = range?.to ?? mapDay;
+  const { from, to } = range;
   const employeeQ = useDebounced(employee.trim());
   const filter: BookingsFilter = {
-    from: dayStart(from),
-    to: dayStart(addDaysYmd(to, 1)),
+    ...(from ? { from: dayStart(from) } : {}),
+    ...(to ? { to: dayStart(addDaysYmd(to, 1)) } : {}),
     site: 'Manila',
     building: 'Bldg. H',
     ...(agendaType ? { agendaType } : {}),
@@ -7744,14 +8211,11 @@ function BookingsTable() {
     });
 
   const pager = usePage(filtered, JSON.stringify([from, to, agendaType, roomId, employeeQ, status, q, mineOnly, atSlot, sort]));
-  const setFrom = (v: string) => {
-    if (!v) return;
-    const cap = addDaysYmd(v, 30); // the API allows 31 days
-    setRange({ from: v, to: to < v ? v : to > cap ? cap : to });
-  };
-  const setTo = (v: string) => v && setRange({ from, to: v < from ? from : v });
+  // Either date may be cleared; "to" stays on or after "from".
+  const setFrom = (v: string) => setRange({ from: v, to: v && to && to < v ? v : to });
+  const setTo = (v: string) => setRange({ from, to: v && from && v < from ? from : v });
   const clear = () => {
-    setRange(null);
+    setRange({ from: '', to: '' });
     setAgendaType('');
     setRoomId('');
     setEmployee('');
@@ -7764,7 +8228,7 @@ function BookingsTable() {
   // created/modified by are filled only for your own bookings (privacy rule 5).
   const exportBookings = () =>
     exportCsv(
-      `bookings-${from}${to !== from ? `-to-${to}` : ''}.csv`,
+      `bookings-${!from && !to ? 'all' : from === to ? from : `${from || 'start'}-to-${to || 'end'}`}.csv`,
       ['Ticket No', 'Agenda', 'Employee', 'Division', 'Category', 'Building', 'Room', 'Starts At', 'Ends At', 'Created By', 'Created Date', 'Status', 'Participants', 'Priority', 'Type of Training', 'Special Instructions', 'Hardware Requirements', 'Recurrence', 'Admin Comments', 'Modified By'],
       filtered.map((b) => [
         b.ticketNo,
@@ -7799,7 +8263,7 @@ function BookingsTable() {
         </label>
         <label className="dt-field">
           <span>to</span>
-          <input type="date" aria-label="Reservation date to" value={to} min={from} max={addDaysYmd(from, 30)} onChange={(e) => setTo(e.target.value)} />
+          <input type="date" aria-label="Reservation date to" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} />
         </label>
         <select aria-label="Type of agenda" value={agendaType} onChange={(e) => setAgendaType(e.target.value as AgendaType | '')}>
           <option value="">Any type of agenda</option>
@@ -9672,7 +10136,7 @@ export function useBookingOps(ticketNo: string) {
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import type { AdminChangeJson, AlternativeView, ProposalView, RoomResultView } from '../agent/context';
+import type { AdminBlockJson, AdminBulkJson, AdminChangeJson, AlternativeView, ProposalView, RoomResultView } from '../agent/context';
 import type { Report } from '../domain/reports';
 import type { AccountView } from '../lib/accounts';
 import type { AuditView } from '../lib/audit';
@@ -9781,10 +10245,10 @@ export interface BookingRequest {
   recurrence?: RecurrenceJson;
 }
 
-/** Filters of GET /api/bookings: the tool's search panel plus status. */
+/** Filters of GET /api/bookings: the tool's search panel plus status. No dates = every booking, past and future. */
 export interface BookingsFilter {
-  from: Date;
-  to: Date;
+  from?: Date;
+  to?: Date;
   agendaType?: AgendaType;
   site?: 'Manila' | 'Iloilo';
   building?: string;
@@ -9838,7 +10302,9 @@ export const api = {
   confirm: (proposalId: string) =>
     call<{ ok: true; booking?: PublicBooking; dates?: number; ticketNo?: string }>(`/api/proposals/${encodeURIComponent(proposalId)}`, { method: 'POST' }),
   bookings: (f: BookingsFilter) => {
-    const q = new URLSearchParams({ from: toManilaIso(f.from), to: toManilaIso(f.to) });
+    const q = new URLSearchParams();
+    if (f.from) q.set('from', toManilaIso(f.from));
+    if (f.to) q.set('to', toManilaIso(f.to));
     for (const k of ['agendaType', 'site', 'building', 'roomId', 'employee', 'status'] as const) if (f[k]) q.set(k, String(f[k]));
     return call<{ ok: true; bookings: PublicBooking[] }>(`/api/bookings?${q}`).then((r) => r.bookings);
   },
@@ -9869,6 +10335,16 @@ export const adminApi = {
   approveMany: (ticketNos: string[]) =>
     call<{ ok: true; approved: string[]; failed: Array<{ ticketNo: string; message: string }> }>('/api/admin/bookings/approve', { method: 'POST', body: JSON.stringify({ ticketNos }) }),
   swap: (a: string, b: string) => call<{ ok: true; bookings: AdminBooking[] }>('/api/admin/bookings/swap', { method: 'POST', body: JSON.stringify({ a, b }) }),
+  /** The bookings a block would cancel (nothing changes). */
+  blockPreview: (body: AdminBlockJson) => call<{ ok: true; affected: AdminBooking[] }>('/api/admin/blocks', { method: 'POST', body: JSON.stringify({ ...body, dryRun: true }) }),
+  /** Blocks the rooms, cancelling `cancel` (the tickets Admin saw); any other booking in the way stops it. */
+  block: (body: AdminBlockJson, cancel: string[]) =>
+    call<{ ok: true; blocks: AdminBooking[]; cancelled: AdminBooking[] }>('/api/admin/blocks', { method: 'POST', body: JSON.stringify({ ...body, cancel }) }),
+  /** How many bookings a bulk booking makes, for whom, and the bookings it would cancel (nothing changes). */
+  bulkPreview: (body: AdminBulkJson) =>
+    call<{ ok: true; count: number; owner: string; affected: AdminBooking[] }>('/api/admin/bookings/bulk', { method: 'POST', body: JSON.stringify({ ...body, dryRun: true }) }),
+  bulk: (body: AdminBulkJson, cancel: string[]) =>
+    call<{ ok: true; created: AdminBooking[]; cancelled: AdminBooking[] }>('/api/admin/bookings/bulk', { method: 'POST', body: JSON.stringify({ ...body, cancel }) }),
   reports: (from: Date, to: Date) => call<{ ok: true; report: ReportJson }>(`/api/admin/reports?${range(from, to)}`).then((r) => r.report),
   audit: () => call<{ ok: true; entries: AuditView[] }>('/api/admin/audit').then((r) => r.entries),
   users: () => call<{ ok: true; users: AccountView[] }>('/api/admin/users').then((r) => r.users),
@@ -10009,6 +10485,7 @@ export const STATUS_WORDS: Record<string, string> = {
   Cancelled: 'Cancelled',
   Completed: 'Completed',
   Held: 'Held',
+  Blocked: 'Blocked by Admin',
 };
 
 /** Status in a few words for list rows ("In Progress" → "Requested"). */
@@ -10234,6 +10711,8 @@ export function shortName(name: string): string {
   return first ? `${last}, ${first[0]}.` : name;
 }
 
+const BLOCKED = 'Blocked by Admin';
+
 /**
  * Who holds the room at the selected time: owner name (and division), or "You". Only what the privacy
  * rule allows for other people's bookings (owner, division, time, group size).
@@ -10241,10 +10720,11 @@ export function shortName(name: string): string {
 export function reservedBy(status: RoomStatus | undefined): { short: string; full: string; count: number } | null {
   if (!status || status.busy.length === 0) return null;
   const sorted = [...status.busy].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
-  const people = [...new Map(sorted.map((b) => [b.mine ? 'You' : b.owner, b] as const)).values()];
+  const who = (b: PublicBooking) => (b.mine ? 'You' : b.status === 'Blocked' ? BLOCKED : b.owner);
+  const people = [...new Map(sorted.map((b) => [who(b), b] as const)).values()];
   const first = people[0] as PublicBooking;
-  const short = (first.mine ? 'You' : shortName(first.owner)) + (people.length > 1 ? ` +${people.length - 1}` : '');
-  const full = people.map((b) => (b.mine ? 'You' : `${b.owner}${b.division ? ` (${b.division})` : ''}`)).join('; ');
+  const short = (first.mine || first.status === 'Blocked' ? who(first) : shortName(first.owner)) + (people.length > 1 ? ` +${people.length - 1}` : '');
+  const full = people.map((b) => (b.mine || b.status === 'Blocked' ? who(b) : `${b.owner}${b.division ? ` (${b.division})` : ''}`)).join('; ');
   return { short, full, count: people.length };
 }
 ```
@@ -11421,7 +11901,10 @@ import { SuggestionGroups } from '../Suggestions';
 import { useAdminAction } from './shared';
 import { ADMIN_SUGGESTIONS } from './suggestions';
 
-type AdminCard = Extract<UiEvent, { type: 'admin_action' | 'admin_change' | 'admin_swap' | 'admin_message' | 'room_schedule' }>;
+const CARD_TYPES = ['admin_action', 'admin_change', 'admin_swap', 'admin_message', 'admin_block', 'admin_bulk', 'room_schedule'] as const;
+type AdminCard = Extract<UiEvent, { type: (typeof CARD_TYPES)[number] }>;
+const isCard = (e: UiEvent): e is AdminCard => (CARD_TYPES as readonly string[]).includes(e.type);
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 type Part = { kind: 'text'; text: string } | { kind: 'card'; id: string; card: AdminCard };
 interface Msg {
   id: string;
@@ -11477,15 +11960,15 @@ function reducer(s: State, a: Action): State {
 const DOWN = "The assistant isn't available right now. You can still do everything from the Admin pages.";
 
 /** A card with one button that calls /api/admin/*; after it worked, it says so and can't be pressed again. */
-function ActionCard({ title, lines, button, doneText, danger, run, onDone, children }: {
+function ActionCard<T>({ title, lines, button, doneText, danger, run, onDone, children }: {
   title: string;
   lines: string[];
   button: string;
   /** What the card says after the button worked, e.g. "Approved. Tester, Charlie gets a note in Messages." */
   doneText: string;
   danger?: boolean;
-  run: () => Promise<unknown>;
-  onDone: () => void;
+  run: () => Promise<T>;
+  onDone: (result: T) => void;
   children?: ReactNode;
 }) {
   const action = useAdminAction();
@@ -11507,10 +11990,10 @@ function ActionCard({ title, lines, button, doneText, danger, run, onDone, child
             className={`btn btn--small ${danger ? 'btn--danger' : 'btn--primary'}`}
             disabled={action.working}
             onClick={async () => {
-              const ok = await action.run(run);
-              if (ok !== undefined) {
+              const result = await action.run(run);
+              if (result !== undefined) {
                 setDone(doneText);
-                onDone();
+                onDone(result);
               }
             }}
           >
@@ -11520,6 +12003,23 @@ function ActionCard({ title, lines, button, doneText, danger, run, onDone, child
         </div>
       )}
       {action.error && <div className="error-line">{action.error}</div>}
+    </div>
+  );
+}
+
+/** The bookings a block or bulk booking card would cancel. */
+function AffectedLines({ lines }: { lines: string[] }) {
+  if (lines.length === 0) return <div className="card__meta">No bookings in the way.</div>;
+  return (
+    <div className="affected">
+      <p>
+        <strong>Cancels {plural(lines.length, 'booking')}</strong> in the way; each owner gets a message:
+      </p>
+      <ul>
+        {lines.map((l) => (
+          <li key={l}>{l}</li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -11565,6 +12065,38 @@ function CardView({ card, onConfirmed }: { card: AdminCard; onConfirmed: (ticket
           <textarea className="card__textarea" rows={4} maxLength={2000} value={text} onChange={(e) => setText(e.target.value)} aria-label="Message" />
         </ActionCard>
       );
+    case 'admin_block': {
+      const n = card.cancel.length;
+      return (
+        <ActionCard
+          title={card.title}
+          lines={card.lines}
+          button={n ? `Block and cancel ${plural(n, 'booking')}` : 'Block'}
+          doneText={`Blocked. Nobody else can book ${card.body.roomIds.length === 1 ? 'the room' : 'these rooms'} then.${n ? ` ${plural(n, 'booking')} cancelled; each owner gets a message.` : ''}`}
+          danger={n > 0}
+          run={() => adminApi.block(card.body, card.cancel)}
+          onDone={(r) => onConfirmed(r.blocks.slice(0, 5).map((b) => b.ticketNo))}
+        >
+          <AffectedLines lines={card.affected} />
+        </ActionCard>
+      );
+    }
+    case 'admin_bulk': {
+      const n = card.cancel.length;
+      return (
+        <ActionCard
+          title={card.title}
+          lines={card.lines}
+          button={n ? `Book ${card.count} and cancel ${plural(n, 'booking')}` : `Book ${card.count}`}
+          doneText={`Booked ${plural(card.count, 'booking')} for ${card.owner}, Approved.${n ? ` ${plural(n, 'booking')} cancelled; each owner gets a message.` : ''}`}
+          danger={n > 0}
+          run={() => adminApi.bulk(card.body, card.cancel)}
+          onDone={(r) => onConfirmed(r.created.slice(0, 5).map((b) => b.ticketNo))}
+        >
+          <AffectedLines lines={card.affected} />
+        </ActionCard>
+      );
+    }
     case 'room_schedule':
       return (
         <div className="card card--admin">
@@ -11629,7 +12161,7 @@ export function AdminAssistant({ hidden, onHide, onStreaming, onReply }: {
         if (event === 'text') dispatch({ type: 'delta', text: (data as { delta: string }).delta });
         else if (event === 'ui') {
           const e = data as UiEvent;
-          if (e.type === 'admin_action' || e.type === 'admin_change' || e.type === 'admin_swap' || e.type === 'admin_message' || e.type === 'room_schedule') dispatch({ type: 'card', card: e });
+          if (isCard(e)) dispatch({ type: 'card', card: e });
         } else if (event === 'done') {
           finished = true;
           dispatch({ type: 'done', history: (data as { history: unknown[] }).history });
@@ -11681,7 +12213,7 @@ export function AdminAssistant({ hidden, onHide, onStreaming, onReply }: {
         {s.messages.length === 0 && (
           <div className="welcome">
             <h1>Manage bookings</h1>
-            <p>Ask about requests, bookings, rooms or usage. I prepare approvals, changes, swaps and messages as cards; nothing changes until you press a card&apos;s button.</p>
+            <p>Ask about requests, bookings, rooms or usage. I prepare approvals, changes, swaps, room blocks, bulk bookings and messages as cards; nothing changes until you press a card&apos;s button.</p>
             <SuggestionGroups groups={ADMIN_SUGGESTIONS} onPick={(q) => void send(q)} />
           </div>
         )}
@@ -11751,6 +12283,457 @@ export function AdminAssistant({ hidden, onHide, onStreaming, onReply }: {
 }
 ```
 
+### `src/ui/admin/AdminBlockBulk.tsx`
+
+<!-- verbatim: src/ui/admin/AdminBlockBulk.tsx -->
+```tsx
+'use client';
+
+/**
+ * Block rooms… and Bulk booking… on Admin › Bookings (docs/spec/06-ui.md, S16; flows F35, F36). Admin picks the rooms
+ * and the time; Check lists the bookings in the way (nothing changes); the button blocks or books and cancels exactly
+ * those, each owner getting a message. A booking made after Check stops it, so Admin checks again and sees it first.
+ */
+import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import type { AdminBlockJson, AdminBulkJson } from '../../agent/context';
+import { WEEKDAYS, type Weekday } from '../../domain/recurrence';
+import { addMinutes } from '../../domain/time';
+import type { AgendaType, Priority, TrainingType } from '../../domain/types';
+import { adminApi, useSession, type AdminBooking, type AdminRoomView } from '../api';
+import { fmtWhen, STATUS_WORDS } from '../format';
+import { Sheet } from '../Sheet';
+import { AGENDA_TYPES } from '../TimeFields';
+import { fromLocalInput, fromYmd, toLocalInput, useAdminAction, useServerNow, ymd } from './shared';
+
+/** The server's limit for one block or bulk booking (BULK_LIMITS.rooms in src/services/adminBlocks.ts). */
+const MAX_ROOMS = 30;
+const DAY = 24 * 60;
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const nextHalfHour = (d: Date) => new Date(Math.ceil(d.getTime() / 1_800_000) * 1_800_000);
+const weekdayOf = (d: Date) => WEEKDAYS[new Date(d.getTime() + 8 * 3_600_000).getUTCDay()] as Weekday;
+
+function useRoomName(rooms: AdminRoomView[]) {
+  return (id: string) => {
+    const r = rooms.find((x) => x.id === id);
+    return r ? `${r.name}, ${r.floor}` : id;
+  };
+}
+
+/** Every room by floor, a check box each; `why` greys out a room that can't take the booking, saying why. */
+function RoomPicker({ rooms, value, onChange, why }: { rooms: AdminRoomView[]; value: string[]; onChange: (ids: string[]) => void; why?: (r: AdminRoomView) => string | null }) {
+  const floors = [...new Set(rooms.map((r) => r.floor))].sort();
+  const add = (ids: string[]) => onChange([...new Set([...value, ...ids])].slice(0, MAX_ROOMS));
+  return (
+    <fieldset className="room-picker">
+      <legend>
+        Rooms <span className="bf-optional">({value.length} picked, up to {MAX_ROOMS})</span>
+      </legend>
+      {floors.map((floor) => {
+        const onFloor = rooms.filter((r) => r.floor === floor).sort((a, b) => a.name.localeCompare(b.name));
+        const open = onFloor.filter((r) => !why?.(r));
+        const all = open.length > 0 && open.every((r) => value.includes(r.id));
+        return (
+          <div key={floor} className="room-picker__floor">
+            <div className="room-picker__head">
+              <strong>{floor}</strong>
+              {open.length > 0 && (
+                <button type="button" className="btn btn--link btn--small" onClick={() => (all ? onChange(value.filter((id) => !open.some((r) => r.id === id))) : add(open.map((r) => r.id)))}>
+                  {all ? 'Clear' : `All on ${floor}`}
+                </button>
+              )}
+            </div>
+            {onFloor.map((r) => {
+              const reason = why?.(r) ?? null;
+              const checked = value.includes(r.id);
+              return (
+                <label key={r.id} className={`room-picker__room${reason ? ' is-off' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={!checked && (!!reason || value.length >= MAX_ROOMS)}
+                    onChange={(e) => (e.target.checked ? add([r.id]) : onChange(value.filter((id) => id !== r.id)))}
+                  />
+                  <span>{r.name}</span>
+                  <span className="dt-muted">{reason ?? (r.capacity ? `${r.capacity} seats` : '')}</span>
+                </label>
+              );
+            })}
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/** The bookings it would cancel, after Check. */
+function Affected({ affected, roomName, head }: { affected: AdminBooking[]; roomName: (id: string) => string; head: string }) {
+  return (
+    <div className={`affected${affected.length ? '' : ' affected--none'}`} role="status">
+      <p>
+        <strong>{head}</strong>{' '}
+        {affected.length ? `${plural(affected.length, 'booking')} in the way will be cancelled; each owner gets a message with the reason.` : 'No bookings in the way.'}
+      </p>
+      {affected.length > 0 && (
+        <ul>
+          {affected.map((b) => (
+            <li key={b.ticketNo}>
+              <span className="dt-mono">{b.ticketNo}</span> · {b.owner}
+              {b.division ? ` (${b.division})` : ''} · {roomName(b.roomId)} · {fmtWhen(b.start, b.end)} · {STATUS_WORDS[b.status] ?? b.status}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function Done({ text, onClose }: { text: string; onClose: () => void }) {
+  return (
+    <div className="admin-bulk">
+      <div className="banner banner--info" role="status">
+        {text}
+      </div>
+      <div className="btn-row">
+        <button className="btn btn--primary btn--small" onClick={onClose}>
+          Done
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Close rooms for a time (maintenance, an event): nobody else can book them then. */
+export function BlockRoomsSheet({ rooms, onClose }: { rooms: AdminRoomView[]; onClose: () => void }) {
+  const now = useServerNow();
+  const [roomIds, setRoomIds] = useState<string[]>([]);
+  const [wholeDays, setWholeDays] = useState(false);
+  const [start, setStart] = useState(() => toLocalInput(nextHalfHour(now())));
+  const [end, setEnd] = useState(() => toLocalInput(addMinutes(nextHalfHour(now()), 60)));
+  const [fromDay, setFromDay] = useState(() => ymd(now()));
+  const [toDay, setToDay] = useState(() => ymd(now()));
+  const [reason, setReason] = useState('');
+  const [affected, setAffected] = useState<AdminBooking[] | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const action = useAdminAction();
+  const roomName = useRoomName(rooms);
+  // Any change needs a new Check: the list of bookings in the way is for exactly this block.
+  const change =
+    <T,>(set: (v: T) => void) =>
+    (v: T) => {
+      set(v);
+      setAffected(null);
+      action.setError(null);
+    };
+  const body = (): AdminBlockJson => ({
+    roomIds,
+    start: wholeDays ? `${fromDay}T00:00:00+08:00` : fromLocalInput(start),
+    end: wholeDays ? `${ymd(addMinutes(fromYmd(toDay), DAY))}T00:00:00+08:00` : fromLocalInput(end),
+    reason: reason.trim(),
+  });
+  const when = () => fmtWhen(body().start, body().end);
+
+  const submit = async () => {
+    if (!affected) {
+      const res = await action.run(() => adminApi.blockPreview(body()));
+      if (res) setAffected(res.affected);
+      return;
+    }
+    const res = await action.run(() => adminApi.block(body(), affected.map((b) => b.ticketNo)));
+    if (!res) return setAffected(null); // e.g. someone booked in the meantime: Check again shows them
+    setDone(`Blocked ${plural(res.blocks.length, 'room')} · ${when()}.${res.cancelled.length ? ` Cancelled ${plural(res.cancelled.length, 'booking')}; each owner got a message.` : ''} Lift a block by opening it in Bookings.`);
+  };
+
+  return (
+    <Sheet title="Block rooms" subtitle="Nobody else can book them then. People see “Blocked by Admin”." onClose={onClose} wide>
+      {done ? (
+        <Done text={done} onClose={onClose} />
+      ) : (
+        <form
+          className="admin-bulk"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+        >
+          <RoomPicker rooms={rooms} value={roomIds} onChange={change(setRoomIds)} />
+          <div className="form-grid">
+            <label className="bf-check">
+              <input type="checkbox" checked={wholeDays} onChange={(e) => change(setWholeDays)(e.target.checked)} />
+              Whole days
+            </label>
+            {wholeDays ? (
+              <div className="form-row">
+                <label>
+                  From
+                  <input type="date" required value={fromDay} onChange={(e) => e.target.value && change(setFromDay)(e.target.value)} />
+                </label>
+                <label>
+                  To (included)
+                  <input type="date" required min={fromDay} value={toDay} onChange={(e) => e.target.value && change(setToDay)(e.target.value)} />
+                </label>
+              </div>
+            ) : (
+              <div className="form-row">
+                <label>
+                  Starts at
+                  <input type="datetime-local" step={900} required value={start} onChange={(e) => e.target.value && change(setStart)(e.target.value)} />
+                </label>
+                <label>
+                  Ends at
+                  <input type="datetime-local" step={900} required value={end} onChange={(e) => e.target.value && change(setEnd)(e.target.value)} />
+                </label>
+              </div>
+            )}
+            <label>
+              Reason
+              <input required maxLength={200} value={reason} placeholder="e.g. Aircon maintenance" onChange={(e) => change(setReason)(e.target.value)} />
+              <span className="bf-help">For Admin, and for the owners of any bookings it cancels.</span>
+            </label>
+            <p className="card__note">Times are Manila time. A block can last up to 92 days.</p>
+          </div>
+          {affected && <Affected affected={affected} roomName={roomName} head={`${plural(roomIds.length, 'room')} · ${when()}.`} />}
+          {action.error && (
+            <div className="banner banner--error" role="alert">
+              {action.error}
+            </div>
+          )}
+          <div className="btn-row">
+            {affected ? (
+              <button className={`btn btn--small ${affected.length ? 'btn--danger' : 'btn--primary'}`} type="submit" disabled={action.working}>
+                {action.working ? 'Blocking…' : affected.length ? `Block and cancel ${plural(affected.length, 'booking')}` : `Block ${plural(roomIds.length, 'room')}`}
+              </button>
+            ) : (
+              <button className="btn btn--primary btn--small" type="submit" disabled={action.working || roomIds.length === 0 || !reason.trim()}>
+                {action.working ? 'Checking…' : 'Check bookings in the way'}
+              </button>
+            )}
+            <button className="btn btn--secondary btn--small" type="button" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </form>
+      )}
+    </Sheet>
+  );
+}
+
+type Repeat = 'none' | 'Daily' | 'Weekly';
+
+/** Book several rooms at once (and each for every date of a repeat), Approved, for Admin or a person they pick. */
+export function BulkBookingSheet({ rooms, onClose }: { rooms: AdminRoomView[]; onClose: () => void }) {
+  const now = useServerNow();
+  const users = useQuery({ queryKey: ['admin', 'users'], queryFn: adminApi.users });
+  const { data: me } = useSession();
+  const [roomIds, setRoomIds] = useState<string[]>([]);
+  const [agendaType, setAgendaType] = useState<AgendaType>('Meeting');
+  const [agenda, setAgenda] = useState('');
+  const [participants, setParticipants] = useState('4');
+  const [start, setStart] = useState(() => toLocalInput(nextHalfHour(now())));
+  const [end, setEnd] = useState(() => toLocalInput(addMinutes(nextHalfHour(now()), 60)));
+  const [priority, setPriority] = useState<Priority>('Normal');
+  const [trainingType, setTrainingType] = useState<TrainingType>('On-Site');
+  const [instructions, setInstructions] = useState('');
+  const [repeat, setRepeat] = useState<Repeat>('none');
+  const [days, setDays] = useState<Weekday[]>([]);
+  const [until, setUntil] = useState(() => ymd(addMinutes(now(), 28 * DAY)));
+  const [ownerEmail, setOwnerEmail] = useState('');
+  const [preview, setPreview] = useState<{ count: number; owner: string; affected: AdminBooking[] } | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const action = useAdminAction();
+  const roomName = useRoomName(rooms);
+  // Everyone else with an active account (the Admin is "Me").
+  const people = (users.data ?? []).filter((u) => !u.disabled && u.login !== me?.login).sort((a, b) => a.name.localeCompare(b.name));
+  const size = Math.max(1, Number(participants) || 1);
+  // The owner's room booking list: each room only for its Types of agenda, up to its capacity (the server checks too).
+  const why = (r: AdminRoomView) =>
+    r.agendas.length === 0 ? 'not on the booking list' : !r.agendas.includes(agendaType) ? `not for ${agendaType}` : r.capacity && size > r.capacity ? `seats ${r.capacity}` : null;
+  const change =
+    <T,>(set: (v: T) => void) =>
+    (v: T) => {
+      set(v);
+      setPreview(null);
+      action.setError(null);
+    };
+  const setType = (t: AgendaType) => {
+    change(setAgendaType)(t);
+    setRoomIds((ids) => ids.filter((id) => rooms.find((r) => r.id === id)?.agendas.includes(t)));
+  };
+  const lastDay = `${until}T23:59:00+08:00`;
+  const body = (): AdminBulkJson => ({
+    roomIds,
+    agendaType,
+    agenda: agenda.trim(),
+    start: fromLocalInput(start),
+    end: fromLocalInput(end),
+    participants: size,
+    priority,
+    ...(agendaType === 'Training' ? { trainingType } : {}),
+    ...(instructions.trim() ? { specialInstructions: instructions.trim() } : {}),
+    ...(repeat === 'Daily' ? { recurrence: { freq: 'Daily' as const, every: 1, until: lastDay } } : {}),
+    ...(repeat === 'Weekly' ? { recurrence: { freq: 'Weekly' as const, every: 1, days, until: lastDay } } : {}),
+    ...(ownerEmail ? { ownerEmail } : {}),
+  });
+
+  const submit = async () => {
+    if (!preview) {
+      const res = await action.run(() => adminApi.bulkPreview(body()));
+      if (res) setPreview(res);
+      return;
+    }
+    const res = await action.run(() => adminApi.bulk(body(), preview.affected.map((b) => b.ticketNo)));
+    if (!res) return setPreview(null); // e.g. someone booked in the meantime: Check again shows them
+    setDone(
+      `Booked ${plural(res.created.length, 'booking')} for ${preview.owner}, Approved.${ownerEmail ? ` ${preview.owner} gets a note in Messages.` : ''}${res.cancelled.length ? ` Cancelled ${plural(res.cancelled.length, 'booking')} in the way; each owner got a message.` : ''}`,
+    );
+  };
+
+  return (
+    <Sheet title="Bulk booking" subtitle="Several rooms at once, Approved at once. Each room must take the type and the group." onClose={onClose} wide>
+      {done ? (
+        <Done text={done} onClose={onClose} />
+      ) : (
+        <form
+          className="admin-bulk"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+        >
+          <RoomPicker rooms={rooms} value={roomIds} onChange={change(setRoomIds)} why={why} />
+          <div className="form-grid">
+            <label>
+              For
+              <select value={ownerEmail} onChange={(e) => change(setOwnerEmail)(e.target.value)}>
+                <option value="">Me (Admin)</option>
+                {people.map((p) => (
+                  <option key={p.login} value={p.email}>
+                    {p.name}
+                    {p.division ? ` · ${p.division}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Agenda
+              <input required maxLength={200} value={agenda} placeholder="Specific title, e.g. Sales onboarding week" onChange={(e) => change(setAgenda)(e.target.value)} />
+            </label>
+            <div className="form-row">
+              <label>
+                Type of agenda
+                <select value={agendaType} onChange={(e) => setType(e.target.value as AgendaType)}>
+                  {AGENDA_TYPES.map((t) => (
+                    <option key={t}>{t}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                People in each room
+                <input type="number" required min={1} max={500} value={participants} onChange={(e) => change(setParticipants)(e.target.value)} />
+              </label>
+            </div>
+            <div className="form-row">
+              <label>
+                Starts at
+                <input type="datetime-local" step={900} required value={start} onChange={(e) => e.target.value && change(setStart)(e.target.value)} />
+              </label>
+              <label>
+                Ends at
+                <input type="datetime-local" step={900} required value={end} onChange={(e) => e.target.value && change(setEnd)(e.target.value)} />
+              </label>
+            </div>
+            <div className="form-row">
+              <label>
+                Repeat
+                <select
+                  value={repeat}
+                  onChange={(e) => {
+                    const next = e.target.value as Repeat;
+                    change(setRepeat)(next);
+                    // Every week starts on the first date's weekday; Admin can add more days.
+                    if (next === 'Weekly') setDays([weekdayOf(new Date(fromLocalInput(start)))]);
+                  }}
+                >
+                  <option value="none">No repeat</option>
+                  <option value="Daily">Every day</option>
+                  <option value="Weekly">Every week on…</option>
+                </select>
+              </label>
+              {repeat !== 'none' && (
+                <label>
+                  Until (last date)
+                  <input type="date" required min={start.slice(0, 10)} value={until} onChange={(e) => e.target.value && change(setUntil)(e.target.value)} />
+                </label>
+              )}
+            </div>
+            {repeat === 'Weekly' && (
+              <fieldset className="bf-radios bf-days">
+                <legend>On</legend>
+                {WEEKDAYS.map((w) => (
+                  <label key={w} title={w}>
+                    <input type="checkbox" aria-label={w} checked={days.includes(w)} onChange={(e) => change(setDays)(e.target.checked ? [...days, w] : days.filter((x) => x !== w))} />
+                    {w.slice(0, 3)}
+                  </label>
+                ))}
+              </fieldset>
+            )}
+            <div className="form-row">
+              <label>
+                Priority
+                <select value={priority} onChange={(e) => change(setPriority)(e.target.value as Priority)}>
+                  <option>Normal</option>
+                  <option>Urgent</option>
+                </select>
+              </label>
+              {agendaType === 'Training' && (
+                <label>
+                  Type of training
+                  <select value={trainingType} onChange={(e) => change(setTrainingType)(e.target.value as TrainingType)}>
+                    <option>On-Site</option>
+                    <option>Virtual</option>
+                  </select>
+                </label>
+              )}
+            </div>
+            <label>
+              <span>
+                Special instructions <span className="bf-optional">(optional)</span>
+              </span>
+              <input maxLength={500} value={instructions} onChange={(e) => change(setInstructions)(e.target.value)} />
+            </label>
+            <p className="card__note">Times are Manila time. Up to 100 bookings at once (rooms × dates).</p>
+          </div>
+          {preview && <Affected affected={preview.affected} roomName={roomName} head={`${plural(preview.count, 'booking')} for ${preview.owner}.`} />}
+          {action.error && (
+            <div className="banner banner--error" role="alert">
+              {action.error}
+            </div>
+          )}
+          <div className="btn-row">
+            {preview ? (
+              <button className={`btn btn--small ${preview.affected.length ? 'btn--danger' : 'btn--primary'}`} type="submit" disabled={action.working}>
+                {action.working
+                  ? 'Booking…'
+                  : preview.affected.length
+                    ? `Book ${preview.count} and cancel ${plural(preview.affected.length, 'booking')}`
+                    : `Book ${plural(preview.count, 'room booking')}`}
+              </button>
+            ) : (
+              <button className="btn btn--primary btn--small" type="submit" disabled={action.working || roomIds.length === 0 || !agenda.trim() || (repeat === 'Weekly' && days.length === 0)}>
+                {action.working ? 'Checking…' : 'Check bookings in the way'}
+              </button>
+            )}
+            <button className="btn btn--secondary btn--small" type="button" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </form>
+      )}
+    </Sheet>
+  );
+}
+```
+
 ### `src/ui/admin/AdminBookingSheet.tsx`
 
 <!-- verbatim: src/ui/admin/AdminBookingSheet.tsx -->
@@ -11761,6 +12744,7 @@ export function AdminAssistant({ hidden, onHide, onStreaming, onReply }: {
  * One booking for Admin (docs/spec/06-ui.md, S17 Admin booking): every field of the tool and the owner's e-mail;
  * Approve, Turn down (with a reason), Change, Swap rooms, Cancel and Check in; and the booking's thread with its
  * owner. Every action goes through /api/admin/* (the server checks the rules again) and leaves a note for the owner.
+ * A room block (status Blocked) can only be lifted: it has no owner to message and is never changed or swapped.
  */
 import { useState, type ReactNode } from 'react';
 import { describeRecurrence, fromRecurrenceJson } from '../../domain/recurrence';
@@ -11774,6 +12758,8 @@ import { fromLocalInput, StatusChip, toLocalInput, useAdminAction, useServerNow 
 
 type Mode = 'view' | 'reject' | 'cancel' | 'change' | 'swap';
 const open = (b: AdminBooking) => b.status !== 'Cancelled' && b.status !== 'Completed';
+/** Open and not a room block: can be changed or swapped. */
+const editable = (b: AdminBooking) => open(b) && b.status !== 'Blocked';
 const overlaps = (a: AdminBooking, b: AdminBooking) => Date.parse(a.start) < Date.parse(b.end) && Date.parse(b.start) < Date.parse(a.end);
 
 export function AdminBookingSheet({
@@ -11795,6 +12781,7 @@ export function AdminBookingSheet({
   const [done, setDone] = useState<string | null>(null);
   const action = useAdminAction();
   const room = rooms.find((r) => r.id === b.roomId);
+  const block = b.status === 'Blocked';
   const roomName = (id: string) => {
     const r = rooms.find((x) => x.id === id);
     return r ? `${r.name}, ${r.floor}` : id;
@@ -11806,33 +12793,45 @@ export function AdminBookingSheet({
     setB(res.booking ?? { ...b, status: 'Cancelled' });
     setMode('view');
     setComment('');
-    setDone({ approve: 'Approved.', reject: 'Turned down.', cancel: 'Cancelled.', checkin: 'Checked in.' }[kind] + ' The owner gets a note in Messages.');
+    setDone(block ? 'Block lifted. The room can be booked again.' : { approve: 'Approved.', reject: 'Turned down.', cancel: 'Cancelled.', checkin: 'Checked in.' }[kind] + ' The owner gets a note in Messages.');
   };
 
   const w = checkInWindow({ start: new Date(b.start) });
   const t = now();
   const canCheckIn = (b.status === 'Approved' || b.status === 'In Progress') && t >= w.start && t < w.end;
   const dash = (v: ReactNode) => v || <span className="dt-muted">—</span>;
-  const rows: Array<[string, ReactNode]> = [
-    ['Name of requestor', b.owner],
-    ['E-mail', dash(b.ownerEmail)],
-    ['Division', dash(b.division)],
-    ['Agenda', b.agenda],
-    ['Type of agenda', b.agendaType],
-    ['Priority', dash(b.priority)],
-    ['Type of training', dash(b.trainingType)],
-    ['Number of participants', `${b.participants}${room?.capacity ? ` (room seats ${room.capacity})` : ''}`],
-    ['Room', roomName(b.roomId)],
-    ['Starts at', fmtTool(b.start)],
-    ['Ends at', fmtTool(b.end)],
-    ['Recurrence', dash(b.recurrence && describeRecurrence(fromRecurrenceJson(b.recurrence)))],
-    ['Special instructions', dash(b.specialInstructions)],
-    ['Hardware requirements', dash(b.hardwareRequirements?.join(', '))],
-    ['Admin comments', dash(b.adminComments)],
-    ['Created by', dash(b.createdBy)],
-    ['Created date', dash(b.createdAt && fmtToolDate(b.createdAt))],
-    ['Modified by', dash(b.modifiedBy)],
-  ];
+  const rows: Array<[string, ReactNode]> = block
+    ? [
+        ['Blocked by', b.owner],
+        ['Reason', b.agenda],
+        ['Room', roomName(b.roomId)],
+        ['Starts at', fmtTool(b.start)],
+        ['Ends at', fmtTool(b.end)],
+        ['Admin comments', dash(b.adminComments)],
+        ['Created by', dash(b.createdBy)],
+        ['Created date', dash(b.createdAt && fmtToolDate(b.createdAt))],
+        ['Modified by', dash(b.modifiedBy)],
+      ]
+    : [
+        ['Name of requestor', b.owner],
+        ['E-mail', dash(b.ownerEmail)],
+        ['Division', dash(b.division)],
+        ['Agenda', b.agenda],
+        ['Type of agenda', b.agendaType],
+        ['Priority', dash(b.priority)],
+        ['Type of training', dash(b.trainingType)],
+        ['Number of participants', `${b.participants}${room?.capacity ? ` (room seats ${room.capacity})` : ''}`],
+        ['Room', roomName(b.roomId)],
+        ['Starts at', fmtTool(b.start)],
+        ['Ends at', fmtTool(b.end)],
+        ['Recurrence', dash(b.recurrence && describeRecurrence(fromRecurrenceJson(b.recurrence)))],
+        ['Special instructions', dash(b.specialInstructions)],
+        ['Hardware requirements', dash(b.hardwareRequirements?.join(', '))],
+        ['Admin comments', dash(b.adminComments)],
+        ['Created by', dash(b.createdBy)],
+        ['Created date', dash(b.createdAt && fmtToolDate(b.createdAt))],
+        ['Modified by', dash(b.modifiedBy)],
+      ];
 
   return (
     <Sheet title={b.ticketNo} subtitle={<>{fmtWhen(b.start, b.end)} · <StatusChip status={b.status} /></>} onClose={onClose} wide>
@@ -11861,7 +12860,7 @@ export function AdminBookingSheet({
                   </button>
                 </>
               )}
-              {open(b) && (
+              {editable(b) && (
                 <>
                   <button className="btn btn--secondary btn--small" disabled={action.working} onClick={() => setMode('change')}>
                     Change…
@@ -11878,7 +12877,7 @@ export function AdminBookingSheet({
               )}
               {open(b) && b.status !== 'Checked-In' && (
                 <button className="btn btn--danger btn--small" disabled={action.working} onClick={() => setMode('cancel')}>
-                  Cancel…
+                  {block ? 'Lift block…' : 'Cancel…'}
                 </button>
               )}
             </div>
@@ -11892,12 +12891,12 @@ export function AdminBookingSheet({
               }}
             >
               <label>
-                {mode === 'reject' ? 'Why is it turned down? (the owner sees this)' : 'Reason (optional, the owner sees this)'}
+                {mode === 'reject' ? 'Why is it turned down? (the owner sees this)' : block ? 'Note (optional, for the log)' : 'Reason (optional, the owner sees this)'}
                 <textarea rows={2} maxLength={500} autoFocus value={comment} onChange={(e) => setComment(e.target.value)} />
               </label>
               <div className="btn-row">
                 <button className="btn btn--danger btn--small" type="submit" disabled={action.working || (mode === 'reject' && !comment.trim())}>
-                  {mode === 'reject' ? 'Turn down' : 'Cancel booking'}
+                  {mode === 'reject' ? 'Turn down' : block ? 'Lift block' : 'Cancel booking'}
                 </button>
                 <button className="btn btn--secondary btn--small" type="button" onClick={() => setMode('view')}>
                   Back
@@ -11924,7 +12923,7 @@ export function AdminBookingSheet({
           {mode === 'swap' && (
             <SwapPicker
               b={b}
-              candidates={others.filter((o) => o.ticketNo !== b.ticketNo && open(o) && o.roomId !== b.roomId)}
+              candidates={others.filter((o) => o.ticketNo !== b.ticketNo && editable(o) && o.roomId !== b.roomId)}
               roomName={roomName}
               busy={action.working}
               onCancel={() => setMode('view')}
@@ -11948,8 +12947,17 @@ export function AdminBookingSheet({
           </dl>
         </section>
         <section>
-          <h3 className="section-title">Messages with {b.owner}</h3>
-          <Thread ticketNo={b.ticketNo} admin />
+          {block ? (
+            <>
+              <h3 className="section-title">Room block</h3>
+              <p className="card__note">People see “Blocked by Admin” on the map and can&apos;t book the room then. Lifting the block frees the room at once. To change it, lift it and block again.</p>
+            </>
+          ) : (
+            <>
+              <h3 className="section-title">Messages with {b.owner}</h3>
+              <Thread ticketNo={b.ticketNo} admin />
+            </>
+          )}
         </section>
       </div>
     </Sheet>
@@ -12117,7 +13125,8 @@ function SwapPicker({
 
 /**
  * S16 Admin bookings (docs/spec/06-ui.md): every booking in a range with all fields. Filter, search, sort, page,
- * approve the selected requests at once, export CSV (all filtered rows or the selected ones), open one to act on it.
+ * approve the selected requests at once, export CSV (all filtered rows or the selected ones), open one to act on it,
+ * block rooms for a time or book several at once (AdminBlockBulk).
  */
 import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
@@ -12125,10 +13134,11 @@ import { adminApi, type AdminBooking } from '../api';
 import { fmtTool, fmtToolDate, fmtWhen } from '../format';
 import { DataGrid, type Column } from '../table/DataGrid';
 import { AGENDA_TYPES } from '../TimeFields';
+import { BlockRoomsSheet, BulkBookingSheet } from './AdminBlockBulk';
 import { AdminBookingSheet } from './AdminBookingSheet';
 import { RangePicker, StatusChip, useAdminAction, useRange } from './shared';
 
-const STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled'] as const;
+const STATUSES = ['In Progress', 'Approved', 'Checked-In', 'Completed', 'Cancelled', 'Blocked'] as const;
 
 export function AdminBookings() {
   const [range, setRange, now] = useRange('next7');
@@ -12137,6 +13147,7 @@ export function AdminBookings() {
   const [type, setType] = useState('');
   const [open, setOpen] = useState<AdminBooking | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [tool, setTool] = useState<'block' | 'bulk' | null>(null);
   const bulk = useAdminAction();
   const bookings = useQuery({
     queryKey: ['admin', 'bookings', range.from.toISOString(), range.to.toISOString(), status],
@@ -12189,9 +13200,19 @@ export function AdminBookings() {
 
   return (
     <div className="admin-page">
-      <header className="admin-page__head">
-        <h1>Bookings</h1>
-        <p className="card__meta">Every reservation with all its fields. Open one to approve, change, swap, cancel or message its owner.</p>
+      <header className="admin-page__head admin-page__head--row">
+        <div>
+          <h1>Bookings</h1>
+          <p className="card__meta">Every reservation with all its fields. Open one to approve, change, swap, cancel or message its owner, or to lift a room block.</p>
+        </div>
+        <div className="btn-row">
+          <button className="btn btn--secondary btn--small" onClick={() => setTool('block')} disabled={rooms.length === 0}>
+            Block rooms…
+          </button>
+          <button className="btn btn--primary btn--small" onClick={() => setTool('bulk')} disabled={rooms.length === 0}>
+            Bulk booking…
+          </button>
+        </div>
       </header>
       {notice && (
         <div className="banner banner--info" role="status">
@@ -12249,6 +13270,8 @@ export function AdminBookings() {
         }
       />
       {open && <AdminBookingSheet booking={open} rooms={rooms} others={bookings.data ?? []} onClose={() => setOpen(null)} />}
+      {tool === 'block' && <BlockRoomsSheet rooms={rooms} onClose={() => setTool(null)} />}
+      {tool === 'bulk' && <BulkBookingSheet rooms={rooms} onClose={() => setTool(null)} />}
     </div>
   );
 }
@@ -12441,7 +13464,8 @@ export function AdminDashboard() {
 /**
  * Live Admin pages (docs/spec/06-ui.md, Admin): asks GET /api/admin/changes every 3 seconds (and as soon as the tab is
  * visible again). When anything changed it refreshes every Admin view and the message threads, so a new booking shows
- * up at once, and it shows a short notice for what other people did: a booking, a cancellation, a check-in, a message.
+ * up at once, and it shows a short notice for what other people did: a booking, a cancellation, a room block, a
+ * check-in, a message.
  */
 import { useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
@@ -12459,6 +13483,10 @@ function noticeFor(e: AuditView): { text: string; href: string } | null {
       return { text: `New booking ${e.target} by ${who}${e.detail ? `: ${e.detail}` : ''}`, href: '/admin/bookings' };
     case 'booking.cancel':
       return { text: `${who} cancelled ${e.target}`, href: '/admin/bookings' };
+    case 'booking.block':
+      return { text: `${who} blocked ${e.detail ?? e.target}`, href: '/admin/bookings' };
+    case 'booking.unblock':
+      return { text: `${who} lifted the block ${e.target}${e.detail ? ` (${e.detail})` : ''}`, href: '/admin/bookings' };
     case 'booking.checkin':
       return { text: `${who} checked in to ${e.target}`, href: '/admin/bookings' };
     case 'booking.release':
@@ -12556,6 +13584,8 @@ export const ACTION_WORDS: Record<string, string> = {
   'session.password': 'Changed password',
   'booking.create': 'Booked',
   'booking.cancel': 'Cancelled',
+  'booking.block': 'Blocked room',
+  'booking.unblock': 'Lifted block',
   'booking.checkin': 'Checked in',
   'booking.release': 'Released (no check-in)',
   'booking.approve': 'Approved',
@@ -13539,6 +14569,7 @@ export const STATUS_COLOURS: Record<string, string> = {
   Completed: 'var(--muted)',
   Cancelled: 'var(--red)',
   Held: 'var(--line)',
+  Blocked: 'var(--ink)',
 };
 
 function DataTable({ head, rows }: { head: string[]; rows: Array<Array<string | number>> }) {
@@ -14338,7 +15369,7 @@ test('a proposal that was never saved is not found', async () => {
 ```ts
 /**
  * Admin routes and messages on the demo scenario (docs/spec/04-api.md, Admin and Messages): who may call them,
- * approve / turn down / change / swap, users and resets, rooms, reports and the audit log.
+ * approve / turn down / change / swap, room blocks and bulk bookings, users and resets, rooms, reports and the audit log.
  * Handlers are called directly; the demo clock starts Mon, Sep 28, 9:00 AM. Tests share one gateway and store, in order.
  */
 import assert from 'node:assert/strict';
@@ -14362,6 +15393,9 @@ before(async () => {
     change: await load('../admin/bookings/[ticketNo]/route', 'PATCH'),
     bulk: await load('../admin/bookings/approve/route', 'POST'),
     swap: await load('../admin/bookings/swap/route', 'POST'),
+    block: await load('../admin/blocks/route', 'POST'),
+    bulkBook: await load('../admin/bookings/bulk/route', 'POST'),
+    publicBookings: await load('../bookings/route'),
     reports: await load('../admin/reports/route'),
     audit: await load('../admin/audit/route'),
     users: await load('../admin/users/route'),
@@ -14418,6 +15452,8 @@ test('every Admin route needs an Admin: 401 signed out, 403 for everyone else', 
     ['change', 'PATCH', '/api/admin/bookings/RM-0129906', { participants: 3 }, { ticketNo: 'RM-0129906' }],
     ['bulk', 'POST', '/api/admin/bookings/approve', { ticketNos: ['RM-0129906'] }, {}],
     ['swap', 'POST', '/api/admin/bookings/swap', { a: 'RM-0129901', b: 'RM-0129902' }, {}],
+    ['block', 'POST', '/api/admin/blocks', { roomIds: ['coron'], start: '2026-10-01T09:00:00+08:00', end: '2026-10-01T12:00:00+08:00', reason: 'Aircon' }, {}],
+    ['bulkBook', 'POST', '/api/admin/bookings/bulk', { roomIds: ['coron'], agendaType: 'Meeting', agenda: 'Sales huddle', start: '2026-10-01T09:00:00+08:00', end: '2026-10-01T10:00:00+08:00', participants: 4 }, {}],
     ['addUser', 'POST', '/api/admin/users', { name: 'Tester, Golf', email: 'golf.tester@example.com' }, {}],
     ['editUser', 'PATCH', `/api/admin/users/${JEREMIAH}`, { role: 'admin' }, { login: JEREMIAH }],
     ['reset', 'POST', `/api/admin/users/${LILI}/reset`, undefined, { login: LILI }],
@@ -14641,6 +15677,95 @@ test('nobody checked in 15 minutes after the start: the next request releases th
   } finally {
     process.env.DEMO_NOW = '2026-09-28T09:00:00+08:00';
   }
+});
+
+test('Admin blocks rooms: sees who is affected, cancels only those, people see "Admin"; a block is only lifted', async () => {
+  const thu = (h: number, m = 0) => `2026-10-01T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00+08:00`;
+  const lilis = await book(LILI, { roomId: 'coron', agenda: 'Client call prep', start: thu(10), end: thu(11) });
+  const block = { roomIds: ['coron', 'binondo'], start: thu(9), end: thu(12), reason: 'Aircon maintenance' };
+  const post = (body: unknown) => r.block!(req('POST', '/api/admin/blocks', as(ADMIN), body), params());
+
+  // Check first: nothing changes, and Admin sees whose booking is in the way.
+  const preview = await json(await post({ ...block, dryRun: true }));
+  assert.deepEqual(preview.affected.map((b: { ticketNo: string; owner: string }) => [b.ticketNo, b.owner]), [[lilis, 'Lagunoy, Lili']]);
+  assert.equal((await post({ ...block, reason: '  ' })).status, 400);
+  // Without agreeing to cancel it, Lili's booking stops the block.
+  const refused = await post(block);
+  assert.equal(refused.status, 409);
+  assert.match((await json(refused)).message, /^The room is taken then\. Lagunoy, Lili has Coron/);
+
+  const done = await json(await post({ ...block, cancel: [lilis] }));
+  assert.deepEqual(done.blocks.map((b: { roomId: string; status: string; agenda: string }) => [b.roomId, b.status, b.agenda]), [['coron', 'Blocked', 'Aircon maintenance'], ['binondo', 'Blocked', 'Aircon maintenance']]);
+  assert.deepEqual(done.cancelled.map((b: { ticketNo: string }) => b.ticketNo), [lilis]);
+  const [coronBlock, binondoBlock] = done.blocks.map((b: { ticketNo: string }) => b.ticketNo) as [string, string];
+
+  // Lili's booking is cancelled with the reason, and a message tells her.
+  const mine = await json(await r.mine!(req('GET', '/api/bookings/mine', as(LILI)), params()));
+  assert.equal(mine.bookings.some((b: { ticketNo: string }) => b.ticketNo === lilis), false, 'cancelled: not in My bookings');
+  const thread = await json(await r.thread!(req('GET', `/api/messages/${lilis}`, as(LILI)), params({ ticketNo: lilis })));
+  assert.match(thread.thread.messages.at(-1).text, /^Admin blocked Coron.* \(Aircon maintenance\), so this booking is cancelled\. Please book another room or time\.$/);
+
+  // Everyone else sees "Admin", not who blocked it or why; the employee filter can't find the Admin through it.
+  const day = 'from=2026-10-01T00:00:00%2B08:00&to=2026-10-02T00:00:00%2B08:00';
+  const seen = await json(await r.publicBookings!(req('GET', `/api/bookings?${day}&roomId=binondo`, as(LILI)), params()));
+  assert.deepEqual(seen.bookings.map((b: Record<string, unknown>) => [b.status, b.owner, b.division, b.mine, b.agenda]), [['Blocked', 'Admin', null, false, undefined]]);
+  const byName = await json(await r.publicBookings!(req('GET', `/api/bookings?${day}&employee=Remetio`, as(LILI)), params()));
+  assert.equal(byName.bookings.some((b: { status: string }) => b.status === 'Blocked'), false);
+  // Nobody can book it then, and it is nobody's own booking, not even the Admin's who made it.
+  const propose = await r.propose!(req('POST', '/api/proposals', as(LILI), { agendaType: 'Meeting', participants: 4, roomId: 'binondo', agenda: 'Design sync', start: thu(10), end: thu(11) }), params());
+  assert.equal(propose.status, 409);
+  const adminMine = await json(await r.mine!(req('GET', '/api/bookings/mine', as(ADMIN)), params()));
+  assert.equal(adminMine.bookings.some((b: { status: string }) => b.status === 'Blocked'), false);
+
+  // A block is never changed, and another block in the way must be lifted first.
+  const change = await r.change!(req('PATCH', `/api/admin/bookings/${binondoBlock}`, as(ADMIN), { end: thu(13) }), params({ ticketNo: binondoBlock }));
+  assert.equal(change.status, 403);
+  assert.match((await json(change)).message, /is a room block: lift it/);
+  const twice = await post({ ...block, roomIds: ['binondo'], start: thu(11), end: thu(13), cancel: [binondoBlock] });
+  assert.equal(twice.status, 403);
+  assert.match((await json(twice)).message, /^Admin already blocked Binondo/);
+
+  // Lifting it frees the room at once; it is logged, and no thread is started (nobody's booking).
+  const lifted = await json(await r.act!(req('POST', `/api/admin/bookings/${binondoBlock}`, as(ADMIN), { action: 'cancel' }), params({ ticketNo: binondoBlock })));
+  assert.equal(lifted.booking.status, 'Cancelled');
+  assert.deepEqual((await json(await r.thread!(req('GET', `/api/messages/${binondoBlock}`, as(ADMIN)), params({ ticketNo: binondoBlock })))).thread.messages, []);
+  await book(LILI, { roomId: 'binondo', agenda: 'Design sync', start: thu(10), end: thu(11) });
+  const log = await json(await r.audit!(req('GET', '/api/admin/audit', as(ADMIN)), params()));
+  const actions = (target: string) => log.entries.filter((e: { target: string }) => e.target === target).map((e: { action: string }) => e.action);
+  assert.deepEqual(actions(coronBlock), ['booking.block']);
+  assert.deepEqual(actions(binondoBlock), ['booking.unblock', 'booking.block']);
+  assert.ok(actions(lilis).includes('booking.cancel'));
+});
+
+test('Admin books several rooms at once for a person they pick: Approved, room rules apply, bookings in the way only on agreement', async () => {
+  const thu = (h: number) => `2026-10-01T${String(h).padStart(2, '0')}:00:00+08:00`;
+  const bulk = { roomIds: ['amsterdam', 'capetown'], agendaType: 'Meeting', agenda: 'Sales huddle', start: thu(13), end: thu(14), participants: 5, ownerEmail: 'jeremiah.sandoval@lexisnexis.com' };
+  const post = (body: unknown) => r.bulkBook!(req('POST', '/api/admin/bookings/bulk', as(ADMIN), body), params());
+  const lilis = await book(LILI, { roomId: 'amsterdam', agenda: 'Budget check', start: thu(13), end: thu(14) });
+
+  const preview = await json(await post({ ...bulk, dryRun: true }));
+  assert.deepEqual([preview.count, preview.owner, preview.affected.map((b: { ticketNo: string }) => b.ticketNo)], [2, 'Sandoval, Jeremiah', [lilis]]);
+  // The owner's room booking list binds Admin too; the owner must have an account or be in the employee list.
+  const wrongRoom = await json(await post({ ...bulk, roomIds: ['amsterdam', 'snowdon'], dryRun: true }));
+  assert.deepEqual([wrongRoom.code, wrongRoom.problems], ['INVALID', ['Snowdon can be booked for Training only, not Meeting.']]);
+  assert.equal((await post({ ...bulk, ownerEmail: 'nobody@example.com', dryRun: true })).status, 404);
+  // A weekly repeat books every room on every date.
+  const weekly = await json(await post({ ...bulk, roomIds: ['huddle7', 'huddle8'], participants: 4, start: '2026-10-02T09:00:00+08:00', end: '2026-10-02T10:00:00+08:00', recurrence: { freq: 'Weekly', every: 1, days: ['Friday'], until: '2026-10-16T23:59:00+08:00' }, dryRun: true }));
+  assert.equal(weekly.count, 6);
+
+  assert.equal((await post(bulk)).status, 409, "Lili's booking stops it until Admin agrees to cancel it");
+  const done = await json(await post({ ...bulk, cancel: [lilis] }));
+  assert.deepEqual(done.created.map((b: Record<string, unknown>) => [b.roomId, b.status, b.owner, b.createdBy]), [['amsterdam', 'Approved', 'Sandoval, Jeremiah', ADMIN], ['capetown', 'Approved', 'Sandoval, Jeremiah', ADMIN]]);
+  assert.deepEqual(done.cancelled.map((b: { ticketNo: string }) => b.ticketNo), [lilis]);
+
+  // Jeremiah holds both rooms at once (a bulk booking may), and a note tells him; Lili's note says why hers went.
+  const mine = await json(await r.mine!(req('GET', '/api/bookings/mine', as(JEREMIAH)), params()));
+  const created = done.created.map((b: { ticketNo: string }) => b.ticketNo) as string[];
+  assert.deepEqual(created.map((t) => mine.bookings.find((b: { ticketNo: string }) => b.ticketNo === t)?.status), ['Approved', 'Approved']);
+  const note = await json(await r.thread!(req('GET', `/api/messages/${created[0]}`, as(JEREMIAH)), params({ ticketNo: created[0] as string })));
+  assert.match(note.thread.messages[0].text, /^Admin booked this for you: Amsterdam, 2F · Thu, Oct 1, 1:00 PM – 2:00 PM\.$/);
+  const lili = await json(await r.thread!(req('GET', `/api/messages/${lilis}`, as(LILI)), params({ ticketNo: lilis })));
+  assert.match(lili.thread.messages.at(-1).text, /^Admin needs Amsterdam, 2F · .* for "Sales huddle", so this booking is cancelled\./);
 });
 ```
 
@@ -15215,8 +16340,15 @@ test('GET /api/bookings is the tool list: every status, the search panel filters
   assert.ok(training.bookings.every((b: { mine: boolean; agendaType?: string }) => b.mine || b.agendaType === undefined));
   const halls = await json(await routes.bookings(get(`/api/bookings?from=2026-10-02T00:00:00%2B08:00&to=2026-10-03T00:00:00%2B08:00&agendaType=Multi-purpose`), noParams));
   assert.deepEqual(halls.bookings.map((b: { roomId: string }) => b.roomId).sort(), ['mph1', 'mph2']);
-  const tooLong = await routes.bookings(get('/api/bookings?from=2026-09-01T00:00:00%2B08:00&to=2026-10-15T00:00:00%2B08:00'), noParams);
-  assert.equal(tooLong.status, 400);
+  // Without dates: every booking, past and future (the owner's request); any range may be asked for, "to" after "from".
+  const everything = await json(await routes.bookings(get('/api/bookings'), noParams));
+  assert.ok(everything.bookings.some((b: { ticketNo: string }) => b.ticketNo === 'RM-0129901'), 'Monday');
+  assert.ok(everything.bookings.some((b: { roomId: string }) => b.roomId === 'mph1'), 'Friday');
+  assert.ok(everything.bookings.every((b: Record<string, unknown>) => b.mine || b.agenda === undefined), 'privacy kept');
+  const fromFriday = await json(await routes.bookings(get('/api/bookings?from=2026-10-02T00:00:00%2B08:00'), noParams));
+  assert.ok(fromFriday.bookings.length > 0 && fromFriday.bookings.every((b: { end: string }) => Date.parse(b.end) > Date.parse('2026-10-02T00:00:00+08:00')));
+  assert.equal((await routes.bookings(get('/api/bookings?from=2026-09-01T00:00:00%2B08:00&to=2026-10-15T00:00:00%2B08:00'), noParams)).status, 200);
+  assert.equal((await routes.bookings(get('/api/bookings?from=2026-10-15T00:00:00%2B08:00&to=2026-09-01T00:00:00%2B08:00'), noParams)).status, 400);
 });
 
 test('a weekly series books every date or none, and says which dates clash', async () => {
@@ -15430,6 +16562,11 @@ test('swap options fit the owner, are free for their whole slot, and prefer the 
   for (const o of options) assert.equal(availabilityFor(o.room.id, alpha, bookings, now).kind, 'available');
   assert.equal(options[0]?.room.floor, '2F');
 });
+
+test("an Admin room block offers no swap: there is nobody to ask", () => {
+  const block: Booking = { ...alpha, ticketNo: 'RM-3', status: 'Blocked', agenda: 'Aircon maintenance', participants: 0 };
+  assert.deepEqual(swapOptionsFor(block, ROOMS, [block], now), []);
+});
 ```
 
 ### `src/domain/__tests__/availability.test.ts`
@@ -15545,6 +16682,13 @@ test('nearest free slots skip booked times and never overlap each other', () => 
   for (const s of slots) assert.equal(conflictsFor('centralpark', s, [alpha], now).length, 0);
   assert.equal(overlaps(slots[0]!, slots[1]!), false);
 });
+
+test("Admin's room block holds the room like a booking, but is nobody's own booking (one room per person)", () => {
+  const want = { start: manila(2026, 9, 28, 15), end: manila(2026, 9, 28, 16), agendaType: 'Meeting' as const };
+  const block = booking('coron', want.start, want.end, { ticketNo: 'RM-5', status: 'Blocked', agenda: 'Aircon maintenance', participants: 0 });
+  assert.deepEqual(conflictsFor('coron', want, [block], now).map((b) => b.ticketNo), ['RM-5']);
+  assert.deepEqual(ownConflicts(owner.email, want, [block], now), [], 'the Admin who blocked it may still book a room then');
+});
 ```
 
 ### `src/domain/__tests__/people.test.ts`
@@ -15553,13 +16697,30 @@ test('nearest free slots skip booked times and never overlap each other', () => 
 ```ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { sameEmail } from '../people';
+import { matchPeople, sameEmail } from '../people';
 
 test('emails match regardless of case; a missing email never matches', () => {
   assert.equal(sameEmail('MarkJoseph.Remetio@lexisnexis.com', 'markjoseph.remetio@lexisnexis.com'), true);
   assert.equal(sameEmail('markjoseph.remetio@lexisnexis.com', 'alpha.tester@example.com'), false);
   assert.equal(sameEmail(undefined, 'markjoseph.remetio@lexisnexis.com'), false);
   assert.equal(sameEmail(undefined, undefined), false);
+});
+
+test('a person is found by any words of their name, in any order, or by their e-mail', () => {
+  const people = [
+    { name: 'Tester, Alpha', email: 'alpha.tester@example.com' },
+    { name: 'Tester, Bravo', email: 'bravo.tester@example.com' },
+    { name: 'Kim, Tae Hwan S.', email: 'taehwan.kim@example.com' },
+  ];
+  const names = (q: string) => matchPeople(people, q).map((p) => p.name);
+  assert.deepEqual(names('alpha'), ['Tester, Alpha']);
+  assert.deepEqual(names('Alpha Tester'), ['Tester, Alpha']);
+  assert.deepEqual(names('Tester, Alpha'), ['Tester, Alpha']);
+  assert.deepEqual(names('tae hwan'), ['Kim, Tae Hwan S.']);
+  assert.deepEqual(names('BRAVO.TESTER@example.com'), ['Tester, Bravo']);
+  assert.deepEqual(names('tester'), ['Tester, Alpha', 'Tester, Bravo'], 'several: the caller asks which one');
+  assert.deepEqual(names('charlie'), []);
+  assert.deepEqual(names('  '), []);
 });
 ```
 
@@ -15741,6 +16902,14 @@ test('a booking released because nobody checked in still counts as a no-show', (
   const r = buildReport({ bookings: [released, b('RM-8', 'tokyo', 28, 18, 1, 'Cancelled')], rooms: ROOMS, from: manila(2026, 9, 28), to: manila(2026, 10, 1), now });
   assert.deepEqual([r.totals.bookings, r.totals.cancelled, r.totals.noShows], [0, 2, 1], 'cancelled, and only the released one is a no-show');
   assert.equal(r.byRoom.find((x) => x.roomId === 'tokyo')?.noShows, 1);
+});
+
+test("Admin's room blocks are not use: no bookings, hours, people or no-shows", () => {
+  const now = manila(2026, 9, 30, 12);
+  const bookings = [b('RM-1', 'coron', 29, 9, 8, 'Blocked', alpha, { agenda: 'Aircon maintenance', participants: 0 }), b('RM-2', 'tokyo', 29, 10, 1, 'Checked-In', bravo)];
+  const r = buildReport({ bookings, rooms: ROOMS, from: manila(2026, 9, 28), to: manila(2026, 10, 1), now });
+  assert.deepEqual([r.totals.bookings, r.totals.hours, r.totals.people, r.totals.noShows], [1, 1, 1, 0]);
+  assert.equal(r.byRoom.find((x) => x.roomId === 'coron')?.count, 0);
 });
 ```
 
@@ -16157,6 +17326,64 @@ test('an Admin change of type checks the owner again: a Training may overlap the
   await assert.rejects(gw.updateBooking(t.ticketNo, { agendaType: 'Meeting' }, admin), (e: unknown) => e instanceof ConflictError && e.kind === 'requester');
   assert.equal((await gw.updateBooking(t.ticketNo, { agenda: 'Excel basics' }, admin)).agendaType, 'Training', 'other changes still work');
 });
+
+test('Admin blocks rooms for a time: nobody can book them then; bookings already there stop it, unless Admin agreed to cancel them', async () => {
+  const gw = emptyGateway();
+  const block = { roomIds: ['snowdon', 'denali'], start: at(9), end: at(12), reason: 'Aircon maintenance' };
+  await assert.rejects(gw.blockRooms(block, alpha, []), /Admin only/);
+  const alphas = await gw.createBooking({ ...request('snowdon', alpha, 10), agendaType: 'Training', start: at(10), end: at(11) });
+  // Someone holds Snowdon then: unless Admin agreed to cancel it, nothing changes and the clash is listed.
+  await assert.rejects(gw.blockRooms(block, admin, []), (e: unknown) => e instanceof ConflictError && e.conflicts[0]?.ticketNo === alphas.ticketNo);
+  assert.equal((await gw.getBookings({ roomIds: ['denali'], from: at(0), to: at(23) })).length, 0, 'all or none');
+  // An unknown room stops it before anything changes, too.
+  await assert.rejects(gw.blockRooms({ ...block, roomIds: ['snowdon', 'atlantis'] }, admin, [alphas.ticketNo]), /Unknown room "atlantis"/);
+  assert.equal((await gw.getBooking(alphas.ticketNo))?.status, 'In Progress');
+
+  const { blocks, cancelled } = await gw.blockRooms(block, admin, [alphas.ticketNo]);
+  assert.deepEqual(blocks.map((b) => [b.roomId, b.status, b.agenda, b.owner.name]), [['snowdon', 'Blocked', 'Aircon maintenance', mark.name], ['denali', 'Blocked', 'Aircon maintenance', mark.name]]);
+  assert.deepEqual(cancelled.map((b) => b.ticketNo), [alphas.ticketNo]);
+  const gone = await gw.getBooking(alphas.ticketNo);
+  assert.deepEqual([gone?.status, gone?.adminComments], ['Cancelled', 'Cancelled by Admin: the room is blocked (Aircon maintenance).']);
+  // The block holds the room like a booking, is never released as a no-show, and Admin lifts it by cancelling.
+  await assert.rejects(gw.createBooking({ ...request('denali', bravo, 10), agendaType: 'Training', start: at(11), end: at(12) }), (e: unknown) => e instanceof ConflictError && e.kind === 'room');
+  const late = new MockGateway({ withSamples: false, now: () => at(11, 59) });
+  await late.blockRooms({ ...block, roomIds: ['elnido'] }, admin, []);
+  assert.deepEqual(await late.releaseNoShows(), []);
+  // A block is only lifted: never changed, moved, swapped, or replaced by another block or bulk booking.
+  const snowdon = (blocks[0] as { ticketNo: string }).ticketNo;
+  const bravos = await gw.createBooking({ ...request('elnido', bravo, 10), agendaType: 'Training', start: at(9), end: at(10) });
+  await assert.rejects(gw.updateBooking(snowdon, { end: at(13) }, admin), /is a room block: lift it/);
+  await assert.rejects(gw.swapRooms(snowdon, bravos.ticketNo, admin), /is a room block: lift it/);
+  await assert.rejects(gw.moveBooking(snowdon, 'elnido', admin), /is a room block: lift it/);
+  await assert.rejects(gw.blockRooms({ ...block, roomIds: ['snowdon'], start: at(11), end: at(14) }, admin, [snowdon]), /already blocks that room then \(Aircon maintenance\)\. Lift that block first/);
+  await assert.rejects(gw.bulkBook({ ...request('snowdon', mark, 10), roomIds: ['snowdon'], agendaType: 'Training', start: at(9), end: at(10) }, admin, [snowdon]), /Lift that block first/);
+  // Nobody's own bookings: not even the Admin's who made it.
+  assert.deepEqual((await gw.listMyBookings(mark.email, at(0), at(23))).map((b) => b.ticketNo), []);
+  await gw.cancelBooking((blocks[1] as { ticketNo: string }).ticketNo, admin, 'Done early');
+  await gw.createBooking({ ...request('denali', bravo, 10), agendaType: 'Training', start: at(11), end: at(12) });
+});
+
+test('Admin books several rooms at once, for every date, Approved, for a person Admin picks; the room rules still apply', async () => {
+  const gw = emptyGateway();
+  const charlie = { name: 'Tester, Charlie', email: 'charlie.tester@example.com', division: 'Learning' };
+  const bulk = { roomIds: ['amsterdam', 'capetown'], start: at(9), end: at(10), agenda: 'Sales huddle', agendaType: 'Meeting' as const, participants: 5, requester: charlie };
+  await assert.rejects(gw.bulkBook(bulk, alpha, []), /Admin only/);
+  await assert.rejects(gw.bulkBook({ ...bulk, roomIds: ['amsterdam', 'snowdon'] }, admin, []), /Snowdon can be booked for Training only, not Meeting/);
+  await assert.rejects(gw.bulkBook({ ...bulk, participants: 6 }, admin, []), /Amsterdam holds up to 5 people, not 6/);
+  const weekly = { ...bulk, recurrence: { freq: 'Weekly' as const, every: 1, days: ['Monday' as const], until: manila(2026, 10, 5, 23) } };
+  const { created, cancelled } = await gw.bulkBook(weekly, admin, []);
+  // Two rooms × two Mondays; one person holds both rooms at once (bulk).
+  assert.equal(created.length, 4);
+  assert.deepEqual(cancelled, []);
+  assert.ok(created.every((b) => b.status === 'Approved' && b.owner.email === charlie.email && b.createdBy === 'MARKJOSEPH.REMETIO'));
+  // Bookings already there stop it, unless Admin agreed to cancel each of them.
+  const first = created.filter((b) => b.start.getTime() === at(9).getTime()).map((b) => b.ticketNo);
+  await assert.rejects(gw.bulkBook({ ...bulk, agenda: 'Second huddle' }, admin, []), (e: unknown) => e instanceof ConflictError && e.conflicts.length === 2);
+  await assert.rejects(gw.bulkBook({ ...bulk, agenda: 'Second huddle' }, admin, first.slice(0, 1)), (e: unknown) => e instanceof ConflictError && e.conflicts[0]?.ticketNo === first[1]);
+  const again = await gw.bulkBook({ ...bulk, agenda: 'Second huddle' }, admin, first);
+  assert.equal(again.cancelled.length, 2);
+  assert.equal((await gw.getBooking((again.cancelled[0] as { ticketNo: string }).ticketNo))?.adminComments, 'Cancelled by Admin: the room is needed for "Second huddle".');
+});
 ```
 
 ## Tests (src/lib/__tests__)
@@ -16530,6 +17757,7 @@ import { formatRange, manila } from '../../domain/time';
 import type { RoomRequest } from '../../domain/types';
 import { MockGateway } from '../../gateway/mockGateway';
 import { searchRooms } from '../searchRooms';
+import { searchResultViews } from '../views';
 
 const now = DEMO_SCENARIO.now; // Mon, Sep 28, 2026, 9:00 AM
 const gw = () => new MockGateway({ scenario: DEMO_SCENARIO, now: () => now });
@@ -16643,6 +17871,20 @@ test('a named room is reported with its real status even when it is not a best f
   assert.equal(await note('Snowdon'), 'Snowdon can be booked for Training only, not Meeting.');
   const unknown = await searchRooms(gw(), meeting(3, monday(12), monday(13)), now, undefined, { room: 'Atlantis' });
   assert.deepEqual([unknown.requested?.match, unknown.requested?.note], [null, 'No room called "Atlantis".']);
+});
+
+test("a room Admin blocked shows as taken by \"Admin\": never the Admin's name, division or reason, never the viewer's own", async () => {
+  const g = gw();
+  const admin = { name: 'Remetio, Mark Joseph', email: 'markjoseph.remetio@lexisnexis.com', login: 'MARKJOSEPH.REMETIO', role: 'admin' as const };
+  await g.blockRooms({ roomIds: ['amsterdam'], start: friday(9), end: friday(17), reason: 'Aircon maintenance' }, admin, []);
+  const r = await searchRooms(g, meeting(5, friday(10), friday(11)), now);
+  assert.ok(!r.fullyFree.some((m) => m.room.id === 'amsterdam'));
+  // The Admin who blocked it searches too: it is still "Admin", not "mine".
+  for (const viewer of ['lili.lagunoy@lexisnexis.com', admin.email]) {
+    const view = searchResultViews(r, viewer).results.find((x) => x.roomId === 'amsterdam');
+    assert.deepEqual(view?.conflicts?.map((c) => [c.owner, c.division, c.mine, c.status]), [['Admin', undefined, false, 'Blocked']], viewer);
+  }
+  assert.ok(!JSON.stringify(searchResultViews(r, admin.email)).includes('Aircon'), 'the reason stays with Admin');
 });
 ```
 
