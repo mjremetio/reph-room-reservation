@@ -1,0 +1,199 @@
+/* Tablet and phone layouts, reduced motion. Imported last so it wins the cascade. */
+
+/* ---------- Narrower than 1,300 px ---------- */
+/* The room app's top bar needs about 1,300 px with the whole RELX logo (an Admin's menu and the clock): below that the
+   RELX symbol stands in for it, so the bar is no wider than with the old R tile. The Admin top bar has the room. */
+@media (max-width: 1299px) {
+  .topbar:not(.admin-topbar) .brand__logo {
+    display: none;
+  }
+  .topbar:not(.admin-topbar) .brand__symbol {
+    display: block;
+  }
+}
+
+/* ---------- Tablet ---------- */
+@media (max-width: 1199px) {
+  :root {
+    --assistant-w: 340px;
+  }
+  .demo-clock {
+    display: none;
+  }
+  /* The site is shown only (the app always uses Manila): the buttons and the user menu need the room. */
+  .site-pill {
+    display: none;
+  }
+}
+
+/* ---------- Small tablet ---------- */
+/* The RELX symbol and the avatar are enough, as on a phone, so Sign out stays on screen for an Admin too. */
+@media (max-width: 1023px) {
+  .topbar:not(.admin-topbar) .brand__text,
+  .user-menu__label {
+    display: none;
+  }
+}
+
+/* ---------- Phone: map on top, assistant as a bottom sheet ---------- */
+@media (max-width: 767px) {
+  .topbar {
+    padding: 0 12px;
+    gap: 8px;
+  }
+  /* The RELX symbol is enough on a phone; the buttons need the room. */
+  .brand__logo,
+  .brand__text {
+    display: none;
+  }
+  .brand__symbol {
+    display: block;
+  }
+  .user-menu {
+    padding-left: 6px;
+  }
+  .schedule-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .schedule-item__when {
+    grid-column: 1 / -1;
+  }
+  .main {
+    display: block;
+    position: relative;
+  }
+  .mapside {
+    height: 100%;
+    padding: 12px 12px 42dvh;
+  }
+  .floormap {
+    max-height: none;
+    min-height: 0;
+  }
+  .mapside {
+    gap: 8px;
+  }
+  /* Two compact rows that scroll sideways, so the map stays in the top half. */
+  .map-toolbar,
+  .slot-controls {
+    flex-wrap: nowrap;
+  }
+  .map-toolbar {
+    overflow-x: auto;
+    scrollbar-width: none;
+    margin: 0 -12px;
+    padding: 0 12px;
+  }
+  .map-toolbar > *,
+  .slot-controls > *,
+  .searchbar > * {
+    flex: none;
+  }
+  .searchbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .search-note {
+    padding: 6px 10px;
+  }
+  .map-toolbar__spacer {
+    display: none;
+  }
+  .search-note {
+    white-space: nowrap;
+  }
+  /* The plan fits the width; pinch or the zoom buttons zoom in, and one finger then pans. */
+  .map-card {
+    padding: 8px;
+  }
+  .assistant {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 40dvh;
+    z-index: 30;
+    border-right: none;
+    border-top: 1px solid var(--line);
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -8px 32px rgb(24 24 26 / 16%);
+    transition: height 0.25s ease, transform 0.3s ease;
+  }
+  .assistant--open {
+    height: calc(100dvh - 72px);
+  }
+  .assistant__scroll {
+    padding-top: 4px;
+  }
+  .assistant--hidden {
+    transform: translateY(110%);
+  }
+  .main--chat-hidden .mapside {
+    padding-bottom: 88px;
+  }
+  .assistant__head {
+    position: relative;
+    padding-top: 16px;
+  }
+  .assistant__grip {
+    display: block;
+    position: absolute;
+    top: 6px;
+    left: 50%;
+    width: 34px;
+    height: 4px;
+    margin-left: -20px;
+    border-radius: 2px;
+    background: var(--line);
+  }
+  .assistant__title {
+    pointer-events: auto;
+    cursor: pointer;
+  }
+  .chat-reopen {
+    position: fixed;
+    top: auto;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    flex-direction: row;
+    justify-content: center;
+    border-radius: 14px;
+    padding: 12px 16px;
+  }
+  .chat-reopen__label {
+    writing-mode: horizontal-tb;
+    transform: none;
+  }
+  .sheet {
+    top: auto;
+    width: 100vw;
+    height: 88dvh;
+    border-radius: 18px 18px 0 0;
+  }
+  /* The New booking modal is a bottom sheet on phones too, with one column. */
+  .sheet--modal {
+    left: 0;
+    bottom: 0;
+    translate: none;
+    max-height: none;
+  }
+  .sheet--modal .bf-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

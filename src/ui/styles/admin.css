@@ -1,0 +1,625 @@
+/* The Admin area (/admin): frame, navigation, pages, stat tiles, charts, the assistant and printing. */
+
+/* ---------- Frame: top bar, side navigation, page, assistant ---------- */
+.admin {
+  position: relative;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr);
+  grid-template-columns: 184px minmax(0, 1fr) var(--assistant-w);
+  grid-template-areas:
+    'top top top'
+    'nav main side';
+  height: 100dvh;
+  background: var(--page);
+  transition: grid-template-columns 0.3s ease;
+}
+/* Hidden like the room assistant's drawer, mirrored: the right column slides shut and the panel clips while it moves. */
+.admin--no-assistant {
+  grid-template-columns: 184px minmax(0, 1fr) 0;
+}
+.admin-topbar {
+  grid-area: top;
+}
+.admin-nav {
+  grid-area: nav;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 10px;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  overflow: auto;
+}
+.admin-nav__link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-btn);
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: none;
+}
+.admin-nav__link:hover {
+  background: var(--plate);
+}
+.admin-nav__link.is-active {
+  background: var(--ink);
+  color: #fff;
+  box-shadow: inset 4px 0 0 var(--brand);
+}
+.admin-main {
+  grid-area: main;
+  overflow: auto;
+  padding: 20px 24px 40px;
+}
+/* Positioned, so absolutely placed bits inside (screen-reader labels) are clipped with the panel too. */
+.admin-assistant-slot {
+  position: relative;
+  grid-area: side;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+}
+@media (min-width: 1200px) {
+  .admin-assistant > * {
+    width: var(--assistant-w);
+  }
+  .admin--no-assistant .admin-assistant-slot {
+    visibility: hidden;
+    border-left-width: 0;
+    transition: visibility 0s linear 0.3s;
+  }
+  .admin--no-assistant .admin-main {
+    padding-right: 56px;
+  }
+}
+/* The Assistant tab: the main page's reopen tab, on the right edge under the top bar. */
+.chat-reopen--right {
+  position: fixed;
+  left: auto;
+  right: 0;
+  top: 68px;
+  border-radius: 12px 0 0 12px;
+}
+
+/* ---------- Pages ---------- */
+.admin-page {
+  display: grid;
+  gap: 16px;
+  max-width: 1400px;
+}
+.admin-page__head h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 26px;
+}
+.admin-page__head--row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.admin-scroll {
+  max-height: calc(100dvh - 300px);
+}
+.dt-row--link:focus-visible > * {
+  outline: 2px solid var(--brand-text);
+  outline-offset: -2px;
+}
+.dt tbody tr.is-picked > * {
+  background: var(--brand-tint);
+}
+.dt-check-col {
+  width: 34px;
+}
+.dt-check-col input {
+  width: 18px;
+  height: 18px;
+}
+.dt--compact th,
+.dt--compact td {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.dt-status--approved {
+  background: var(--green-tint);
+  color: #0f5a2b;
+}
+.dt-status--cancelled {
+  background: var(--red-tint);
+  color: #8a1f17;
+}
+.dt-status--completed,
+.dt-status--held {
+  background: var(--plate);
+  color: var(--muted);
+}
+.admin-warn {
+  color: var(--orange);
+  font-weight: 700;
+}
+.admin-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.admin-card {
+  padding: 16px 18px;
+}
+.admin-card__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.admin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.admin-list__row {
+  display: grid;
+  gap: 6px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--plate);
+}
+.admin-list--compact .admin-list__row {
+  padding: 4px 0;
+}
+.admin-list__main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.admin-list__main strong {
+  flex-basis: 100%;
+}
+.admin-list__reject {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.admin-list__reject input {
+  flex: 1;
+  min-width: 180px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  font: inherit;
+}
+.admin-activity {
+  font-size: 13px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--plate);
+}
+
+/* ---------- The Admin booking sheet ---------- */
+.admin-sheet {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 24px;
+}
+.admin-actions {
+  margin-bottom: 12px;
+}
+.admin-inline {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--plate);
+  border-radius: var(--radius-card);
+  background: var(--page);
+}
+.admin-change {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.admin-change > .card__note,
+.admin-change > .btn-row,
+.admin-change > label:first-child {
+  grid-column: 1 / -1;
+}
+.admin-swap-preview {
+  margin: 0;
+  padding-left: 18px;
+}
+.otp {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+/* ---------- Messages (Admin inbox) ---------- */
+.admin-inbox {
+  display: grid;
+  grid-template-columns: minmax(240px, 360px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.admin-inbox__thread {
+  padding: 16px;
+  min-height: 320px;
+}
+
+/* ---------- Stat tiles ---------- */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+.stat {
+  padding: 10px 14px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  border-top: 4px solid var(--plate-dark);
+}
+.stat--warn {
+  border-top-color: var(--orange);
+}
+.stat--good {
+  border-top-color: var(--green);
+}
+.stat--bad {
+  border-top-color: var(--red);
+}
+.stat__value {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.stat__label {
+  font-weight: 600;
+}
+.stat__hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---------- Charts ---------- */
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+}
+.chart {
+  margin: 0;
+  padding: 16px 18px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.chart__title {
+  font-weight: 700;
+  font-size: 15px;
+}
+.chart__note {
+  margin-left: 8px;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+}
+.chart__empty {
+  color: var(--muted);
+  margin: 0;
+}
+.chart__data summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+.chart__data table {
+  margin-top: 6px;
+}
+.bars {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.bars__row {
+  display: grid;
+  grid-template-columns: minmax(90px, 36%) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.bars__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bars__track {
+  height: 12px;
+  border-radius: 6px;
+  background: var(--plate);
+  overflow: hidden;
+}
+.bars__bar {
+  display: block;
+  height: 100%;
+  border-radius: 6px;
+  background: var(--brand);
+}
+.bars__value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.bars__detail {
+  font-weight: 400;
+  color: var(--muted);
+}
+.columns {
+  width: 100%;
+  height: auto;
+}
+.columns__axis {
+  stroke: var(--line);
+}
+.columns__bar {
+  fill: var(--brand);
+}
+.columns__value,
+.columns__label {
+  font-size: 12px;
+  text-anchor: middle;
+  fill: var(--muted);
+}
+.columns__value {
+  fill: var(--ink);
+  font-weight: 600;
+}
+.donut {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.donut svg {
+  width: 150px;
+  height: 150px;
+}
+.donut__track {
+  fill: none;
+  stroke: var(--plate);
+  stroke-width: 16;
+}
+.donut__total {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  text-anchor: middle;
+  fill: var(--ink);
+}
+.donut__caption {
+  font-size: 11px;
+  text-anchor: middle;
+  fill: var(--muted);
+}
+.legend-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+.legend-list__swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 8px;
+  border-radius: 3px;
+  vertical-align: -1px;
+}
+.heat {
+  display: grid;
+  grid-template-columns: 38px repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  font-size: 11px;
+}
+.heat__row {
+  display: contents;
+}
+.heat__hour,
+.heat__day {
+  color: var(--muted);
+}
+.heat__cell {
+  aspect-ratio: 1;
+  min-height: 12px;
+  border-radius: 3px;
+  background: var(--plate);
+}
+.log-booking {
+  background: var(--blue-tint);
+  color: #173f8c;
+}
+.log-user,
+.log-room {
+  background: var(--orange-tint);
+  color: #7a3305;
+}
+
+/* ---------- The Admin assistant ---------- */
+/* The same parts as the room assistant (shell.css: .assistant__head, __scroll, __composer, .composer). */
+.admin-assistant {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.card--admin {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.card__textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  font: inherit;
+}
+
+/* ---------- Smaller screens ---------- */
+@media (max-width: 1199px) {
+  .admin,
+  .admin--no-assistant {
+    grid-template-columns: 170px minmax(0, 1fr);
+    grid-template-areas:
+      'top top'
+      'nav main';
+  }
+  /* The assistant floats over the page on narrower screens; hidden, only the Assistant tab stays. */
+  .admin-assistant-slot {
+    position: fixed;
+    right: 0;
+    top: 52px;
+    bottom: 0;
+    width: min(420px, 100vw);
+    z-index: 30;
+    box-shadow: var(--shadow);
+  }
+  .admin--no-assistant .admin-assistant-slot {
+    display: none;
+  }
+  .admin-sheet,
+  .admin-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 767px) {
+  .admin,
+  .admin--no-assistant {
+    grid-template-rows: 52px auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'top'
+      'nav'
+      'main';
+  }
+  .admin-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .admin-nav__link {
+    white-space: nowrap;
+    min-height: 34px;
+  }
+  .admin-main {
+    padding: 16px 16px 40px;
+  }
+  .admin-inbox,
+  .admin-change {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .chart-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .admin-topbar .btn--link[href='/'] {
+    display: none;
+  }
+}
+
+/* ---------- Print (Reports → Print / PDF) ---------- */
+@media print {
+  .admin {
+    display: block;
+    height: auto;
+    background: #fff;
+  }
+  .admin-topbar,
+  .no-print {
+    display: none !important;
+  }
+  .admin-main {
+    overflow: visible;
+    padding: 0;
+  }
+  .chart,
+  .stat {
+    box-shadow: none;
+    border: 1px solid var(--plate);
+    break-inside: avoid;
+  }
+  .chart__data {
+    display: none;
+  }
+}
+
+/* Today's bookings on the dashboard: time, room and owner, status. */
+.admin-list--compact .admin-list__main {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+}
+.admin-list--compact .admin-list__main > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Live notices (AdminLive): bottom left, away from the assistant on the right. */
+.admin-toasts {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 40;
+  display: grid;
+  gap: 8px;
+  max-width: min(440px, calc(100vw - 32px));
+}
+.admin-toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 10px 14px;
+  border-radius: var(--radius-card);
+  border-left: 4px solid var(--brand);
+  background: var(--ink);
+  color: #fff;
+  box-shadow: 0 8px 24px rgb(24 24 26 / 25%);
+  animation: fade-in 0.2s ease-out both;
+}
+.admin-toast__text {
+  flex: 1;
+  font-size: 13px;
+}
+.admin-toast .btn--link {
+  color: var(--brand);
+}
+.admin-toast__close {
+  border: none;
+  background: none;
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}

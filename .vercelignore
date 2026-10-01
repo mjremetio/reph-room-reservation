@@ -1,0 +1,10 @@
+# What `vercel deploy` never uploads: secrets and local env files (Vercel has its own settings), build output and
+# local tool files. Vercel builds from the source.
+.env*
+.vercel
+.next
+node_modules
+dist
+.claude
+evals/last-run.md
+*.tsbuildinfo

@@ -1,0 +1,11 @@
+# Keep the build context small and never send local secrets into an image (docs/spec/11-deploy-aws.md).
+.git
+.next
+node_modules
+.env
+.env*.local
+.claude
+docs
+evals/last-run.md
+*.log
+dist

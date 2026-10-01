@@ -1,0 +1,3 @@
+# LF line endings everywhere, also in Windows checkouts (core.autocrlf): the server's shell scripts must run on Linux,
+# and the spec's verbatim copies (npm run spec:check) compare files byte for byte.
+* text=auto eol=lf

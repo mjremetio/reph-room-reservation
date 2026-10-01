@@ -1,0 +1,17 @@
+node_modules/
+.next/
+out/
+dist/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+next-env.d.ts
+.env
+.env*.local
+evals/last-run.md
+.DS_Store
+# Vercel CLI (vercel link): the project link and env files stay on this machine; the template is committed.
+.vercel
+.env*
+!.env.example

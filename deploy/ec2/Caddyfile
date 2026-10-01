@@ -1,0 +1,13 @@
+# Caddy in front of the app (docs/spec/11-deploy-aws.md §8). A host name as SITE_ADDRESS gets HTTPS on its own
+# (Let's Encrypt; ports 80 and 443 must be open); ":80" serves plain HTTP. The assistant's streamed replies
+# (text/event-stream) are passed through as they come, with no time limit.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+	reverse_proxy app:3000
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

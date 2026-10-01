@@ -1,0 +1,251 @@
+{
+  "name": "demo",
+  "description": "Demo week for Bldg. H. Start the clock at Mon, Sep 28, 2026, 9:00 AM (DEMO_NOW). Reproduces the prototype: flow A (5 people, Mon 3:00-4:00 PM), flow B (8 people, Mon 2:00-4:00 PM, Central Park partly free), flow C (hall for 60, Fri Oct 2, 1:00-5:00 PM). The Tester people are placeholders; the sign-in accounts (src/config/accounts.ts) were added at the owner's request.",
+  "now": "2026-09-28T09:00:00+08:00",
+  "demoUser": {
+    "name": "Remetio, Mark Joseph",
+    "email": "markjoseph.remetio@lexisnexis.com",
+    "division": "Sales"
+  },
+  "capacityOverrides": {
+    "saopaolo": 6,
+    "newyork": 6,
+    "paris": 6,
+    "sydney": 4,
+    "tokyo": 4,
+    "rio": 4,
+    "mactan": 10,
+    "siargao": 4,
+    "vigan": 4,
+    "jolo": 4,
+    "camiguin": 4,
+    "tagaytay": 12,
+    "tanay": 6,
+    "huddle6": 3,
+    "bacolod": 6
+  },
+  "people": [
+    {
+      "name": "Remetio, Mark Joseph",
+      "email": "markjoseph.remetio@lexisnexis.com",
+      "division": "Sales"
+    },
+    {
+      "name": "Sandoval, Jeremiah",
+      "email": "jeremiah.sandoval@lexisnexis.com"
+    },
+    {
+      "name": "Lagunoy, Lili",
+      "email": "lili.lagunoy@lexisnexis.com"
+    },
+    {
+      "name": "Kim, Tae Hwan S.",
+      "email": "taehwan.kim@reedelsevier.com"
+    },
+    {
+      "name": "Villagracia, Albert",
+      "email": "albert.villagracia@reedelsevier.com"
+    },
+    {
+      "name": "Account, Dummy",
+      "email": "dummy.account@example.com",
+      "division": "External Judge"
+    },
+    {
+      "name": "Tester, Alpha",
+      "email": "alpha.tester@example.com",
+      "division": "Operations"
+    },
+    {
+      "name": "Tester, Bravo",
+      "email": "bravo.tester@example.com",
+      "division": "HR"
+    },
+    {
+      "name": "Tester, Charlie",
+      "email": "charlie.tester@example.com",
+      "division": "Learning"
+    },
+    {
+      "name": "Tester, Delta",
+      "email": "delta.tester@example.com",
+      "division": "Sales"
+    },
+    {
+      "name": "Tester, Echo",
+      "email": "echo.tester@example.com",
+      "division": "Technology"
+    },
+    {
+      "name": "Tester, Admin",
+      "email": "admin.test@email.com"
+    }
+  ],
+  "bookings": [
+    {
+      "ticketNo": "RM-0129901",
+      "roomId": "amsterdam",
+      "start": "2026-09-28T09:30:00+08:00",
+      "end": "2026-09-28T10:30:00+08:00",
+      "status": "Approved",
+      "agenda": "Daily huddle",
+      "agendaType": "Meeting",
+      "participants": 4,
+      "owner": "alpha.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129902",
+      "roomId": "tokyo",
+      "start": "2026-09-28T10:00:00+08:00",
+      "end": "2026-09-28T11:00:00+08:00",
+      "status": "Approved",
+      "agenda": "Weekly touchpoint meeting",
+      "agendaType": "Meeting",
+      "participants": 4,
+      "owner": "markjoseph.remetio@lexisnexis.com"
+    },
+    {
+      "ticketNo": "RM-0129903",
+      "roomId": "london",
+      "start": "2026-09-28T13:00:00+08:00",
+      "end": "2026-09-28T17:00:00+08:00",
+      "status": "Approved",
+      "agenda": "Client workshop",
+      "agendaType": "Meeting",
+      "participants": 14,
+      "owner": "delta.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129904",
+      "roomId": "coron",
+      "start": "2026-09-28T13:30:00+08:00",
+      "end": "2026-09-28T15:30:00+08:00",
+      "status": "Approved",
+      "agenda": "Panel interviews",
+      "agendaType": "Meeting",
+      "participants": 5,
+      "owner": "bravo.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129905",
+      "roomId": "hydepark",
+      "start": "2026-09-28T14:00:00+08:00",
+      "end": "2026-09-28T16:00:00+08:00",
+      "status": "Approved",
+      "agenda": "Sprint review",
+      "agendaType": "Meeting",
+      "participants": 9,
+      "owner": "echo.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129906",
+      "roomId": "elnido",
+      "start": "2026-09-28T14:00:00+08:00",
+      "end": "2026-09-28T17:00:00+08:00",
+      "status": "In Progress",
+      "agenda": "Coaching circle",
+      "agendaType": "Training",
+      "participants": 10,
+      "owner": "charlie.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129907",
+      "roomId": "newyork",
+      "start": "2026-09-28T14:30:00+08:00",
+      "end": "2026-09-28T15:30:00+08:00",
+      "status": "Approved",
+      "agenda": "Vendor call",
+      "agendaType": "Meeting",
+      "participants": 3,
+      "owner": "echo.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129908",
+      "roomId": "centralpark",
+      "start": "2026-09-28T15:00:00+08:00",
+      "end": "2026-09-28T16:30:00+08:00",
+      "status": "Approved",
+      "agenda": "Team sync",
+      "agendaType": "Meeting",
+      "participants": 4,
+      "owner": "alpha.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129909",
+      "roomId": "paris",
+      "start": "2026-09-28T15:00:00+08:00",
+      "end": "2026-09-28T16:00:00+08:00",
+      "status": "Approved",
+      "agenda": "Client call prep",
+      "agendaType": "Meeting",
+      "participants": 4,
+      "owner": "delta.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129910",
+      "roomId": "snowdon",
+      "start": "2026-09-28T22:00:00+08:00",
+      "end": "2026-09-29T02:00:00+08:00",
+      "status": "Approved",
+      "agenda": "Night shift onboarding",
+      "agendaType": "Training",
+      "participants": 18,
+      "owner": "charlie.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129911",
+      "roomId": "capetown",
+      "start": "2026-09-28T11:00:00+08:00",
+      "end": "2026-09-28T12:00:00+08:00",
+      "status": "Cancelled",
+      "agenda": "Benefits Q&A",
+      "agendaType": "Meeting",
+      "participants": 5,
+      "owner": "bravo.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129912",
+      "roomId": "batanes",
+      "start": "2026-09-29T14:00:00+08:00",
+      "end": "2026-09-29T15:00:00+08:00",
+      "status": "Approved",
+      "agenda": "Client call prep",
+      "agendaType": "Meeting",
+      "participants": 5,
+      "owner": "markjoseph.remetio@lexisnexis.com"
+    },
+    {
+      "ticketNo": "RM-0129913",
+      "roomId": "mph1",
+      "start": "2026-10-02T12:00:00+08:00",
+      "end": "2026-10-02T18:00:00+08:00",
+      "status": "Approved",
+      "agenda": "Q4 town hall",
+      "agendaType": "Multi-purpose",
+      "participants": 50,
+      "owner": "bravo.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129914",
+      "roomId": "mph2",
+      "start": "2026-10-02T13:00:00+08:00",
+      "end": "2026-10-02T17:00:00+08:00",
+      "status": "Approved",
+      "agenda": "New hire training",
+      "agendaType": "Multi-purpose",
+      "participants": 24,
+      "owner": "charlie.tester@example.com"
+    },
+    {
+      "ticketNo": "RM-0129915",
+      "roomId": "mtmayon",
+      "start": "2026-10-02T13:00:00+08:00",
+      "end": "2026-10-02T17:00:00+08:00",
+      "status": "Approved",
+      "agenda": "Product training",
+      "agendaType": "Training",
+      "participants": 20,
+      "owner": "echo.tester@example.com"
+    }
+  ]
+}

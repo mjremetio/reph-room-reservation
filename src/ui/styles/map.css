@@ -1,0 +1,873 @@
+/* Map side: search bar, floor tabs, 2D map, 3D view and its labels, legend. */
+
+/* ---------- Map panel ---------- */
+.mapside {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.mapside > * {
+  flex-shrink: 0; /* the panel scrolls; its rows never squash */
+}
+.map-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.floor-tabs {
+  display: inline-flex;
+  padding: 3px;
+  background: var(--plate);
+  border-radius: 12px;
+  position: relative;
+}
+.floor-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  border-radius: 9px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  color: var(--muted);
+  z-index: 1;
+}
+.floor-tab {
+  transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+.floor-tab[aria-selected='true'] {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgb(24 24 26 / 15%);
+}
+.floor-tab__name {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  align-self: center;
+}
+.floor-tab__count {
+  font-weight: 600;
+  color: var(--green);
+  align-self: center;
+}
+.map-toolbar__spacer {
+  flex: 1;
+}
+.slot-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.searchbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+  padding: 5px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+}
+.searchbar .slot-controls {
+  display: contents;
+}
+.searchbar .btn {
+  min-height: 36px;
+  padding: 0 16px;
+  font-size: 14px;
+}
+.field {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0;
+  min-height: 36px;
+  padding: 2px 10px;
+  border: 1px solid var(--plate);
+  border-radius: 10px;
+  background: var(--page);
+}
+.field label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.field select,
+.field input {
+  border: none;
+  background: transparent;
+  outline: none;
+  font-weight: 600;
+  font-size: 14px;
+  min-height: 28px;
+  padding: 0;
+  cursor: pointer;
+}
+.field input[type='number'] {
+  width: 56px;
+}
+.field:focus-within {
+  border-color: var(--brand-text);
+}
+.search-note {
+  font-size: 14px;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 10px;
+}
+.search-note--A {
+  background: var(--blue-tint);
+  color: #173f8c;
+}
+.search-note--B {
+  background: var(--orange-tint);
+  color: #7a3305;
+}
+.search-note--C,
+.search-note--none {
+  background: var(--plate);
+  color: var(--ink);
+}
+.search-note strong {
+  color: var(--ink);
+}
+.search-error {
+  font-size: 13px;
+  color: var(--danger);
+}
+
+.map-card {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: 10px 10px 8px;
+  box-shadow: var(--shadow);
+}
+.floormap {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: calc(100dvh - 428px);
+  min-height: 240px;
+}
+/* Zoom (FloorMap + mapZoom.ts): buttons top right; once zoomed, the plan is grabbed and dragged. */
+.floormap-wrap {
+  position: relative;
+}
+.floormap.is-zoomed {
+  cursor: grab;
+}
+.floormap.is-zoomed:active {
+  cursor: grabbing;
+}
+.map-zoom {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  gap: 4px;
+}
+.map-zoom button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+.map-zoom button:hover:not(:disabled) {
+  background: var(--page);
+}
+.map-zoom button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.floormap .plate {
+  fill: #f7f7f4;
+  stroke: #4e585e;
+  stroke-width: 4;
+  stroke-linejoin: round;
+}
+/* Everything that is not a bookable room, drawn like the appendix layouts: walls, symbols and small labels. */
+.area {
+  stroke: #8d9692;
+  stroke-width: 1.4;
+  fill: #eeeeea;
+}
+.area--core {
+  fill: var(--plate-dark);
+  stroke: #6f7975;
+  stroke-width: 2.5;
+}
+.area--lift,
+.area--stairs {
+  fill: #dfe3e0;
+}
+.area--restroom {
+  fill: #e5edf0;
+}
+.area--service {
+  fill: #e6e7e3;
+}
+.area--amenity {
+  fill: #e7f0e8;
+}
+.area--unlisted {
+  fill: #f7f0cf;
+  stroke: #c9b35a;
+  stroke-dasharray: 5 3;
+}
+.area-symbols {
+  fill: none;
+  stroke: #9aa39f;
+  stroke-width: 1;
+}
+.area-label {
+  fill: #5f6965;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: #f7f7f4;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.area-label--open {
+  stroke-width: 4px;
+  fill: #7d8783;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.furniture__desks {
+  fill: #ffffff;
+  stroke: #aab2ae;
+  stroke-width: 0.8;
+}
+.furniture__tables {
+  fill: #ffffff;
+  stroke: #9ea7a3;
+  stroke-width: 1;
+}
+.furniture__chairs {
+  fill: #c3cac6;
+}
+.room__furn {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  opacity: 0.28;
+  pointer-events: none;
+}
+.room__chairs {
+  fill: currentColor;
+  opacity: 0.2;
+  pointer-events: none;
+}
+.room--yours {
+  color: #fff;
+}
+.shape--unplaced {
+  stroke-dasharray: 6 4;
+}
+.unplaced text {
+  fill: var(--muted);
+  font-weight: 600;
+}
+.room {
+  cursor: pointer;
+  outline: none;
+  color: var(--ink);
+}
+.room .shape {
+  transition: fill 0.35s ease, stroke 0.35s ease;
+  stroke-width: 1;
+  fill: var(--surface);
+  stroke: var(--line);
+}
+.room .label,
+.room .sub {
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: var(--halo, var(--surface));
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  transition: fill 0.35s ease, stroke 0.35s ease;
+}
+.room .label {
+  font-family: var(--font-map);
+  font-weight: 700;
+  fill: var(--ink);
+}
+.room .sub {
+  font-weight: 600;
+  fill: var(--muted);
+}
+.room--free {
+  --halo: var(--green-tint);
+}
+.room--fits {
+  --halo: var(--green-fill);
+}
+.room--yours {
+  --halo: var(--blue);
+}
+.room--partial {
+  --halo: var(--orange-tint);
+}
+.room--taken {
+  --halo: var(--red-tint);
+}
+.room--unsuitable {
+  --halo: var(--plate);
+}
+/* Available rooms are green: free a lighter green, a search's fitting rooms a stronger one with a thicker edge. */
+.room--free .shape {
+  fill: var(--green-tint);
+  stroke: var(--green);
+  stroke-width: 1.5;
+}
+.room--fits .shape {
+  fill: var(--green-fill);
+  stroke: var(--green);
+  stroke-width: 2.5;
+}
+.room--yours .shape {
+  fill: var(--blue);
+  stroke: var(--blue);
+  stroke-width: 2;
+}
+.room--yours .label,
+.room--yours .sub {
+  fill: #fff;
+}
+.room--partial .shape {
+  fill: var(--orange-tint);
+  stroke: var(--orange);
+  stroke-width: 2;
+}
+.room--taken .shape {
+  fill: url(#hatch);
+  stroke: var(--red);
+  stroke-width: 1.5;
+}
+.room--unsuitable .shape {
+  fill: var(--plate);
+  stroke: var(--line);
+  stroke-dasharray: 4 3;
+}
+.room--unsuitable .label,
+.room--unsuitable .sub {
+  fill: #6b777d;
+}
+.room:hover .shape {
+  stroke: var(--ink);
+}
+.room:focus-visible .focus-ring,
+.room--selected .focus-ring {
+  stroke: var(--ink);
+  stroke-width: 3;
+  fill: none;
+}
+.focus-ring {
+  fill: none;
+  stroke: none;
+}
+.badge {
+  animation: pop 0.2s ease-out 0.35s both;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+@keyframes pop {
+  from {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.badge circle {
+  fill: var(--green);
+}
+.badge text {
+  fill: #fff;
+  font-family: var(--font-map);
+  font-weight: 700;
+  font-size: 15px;
+}
+.you-marker circle {
+  fill: var(--ink);
+}
+.you-marker .halo {
+  fill: rgb(24 24 26 / 15%);
+}
+.you-marker text {
+  font-size: 14px;
+  font-weight: 700;
+  fill: var(--ink);
+  paint-order: stroke;
+  stroke: var(--plate);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
+.legend {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--ink);
+  padding: 8px 6px 2px;
+  border-top: 1px solid var(--plate);
+  margin-top: 4px;
+}
+.legend__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.legend svg {
+  display: block;
+  flex: none;
+}
+/* Room states are buttons: hover or focus previews them on the map, a click keeps them highlighted. */
+.legend__state {
+  min-height: 28px;
+  padding: 0 10px 0 6px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.legend__state:hover,
+.legend__state:focus-visible {
+  background: var(--page);
+  border-color: var(--plate);
+  outline: none;
+}
+.legend__state.is-on {
+  background: var(--brand-tint);
+  border-color: var(--brand);
+}
+.legend__count {
+  min-width: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--plate);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+.legend__count.is-zero {
+  color: var(--muted);
+  background: none;
+}
+.legend__item--plan {
+  min-height: 28px;
+  padding-right: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.legend__plan {
+  padding-top: 2px;
+}
+.legend__spacer {
+  flex: 1;
+}
+.legend .btn--link {
+  min-height: 28px;
+}
+
+/* Legend highlight: rooms (2D) and labels (3D) in other states fade back. */
+.floormap .room,
+.b3d-label {
+  transition: opacity 0.2s ease;
+}
+.floormap[data-highlight='fits'] .room:not(.room--fits),
+.floormap[data-highlight='yours'] .room:not(.room--yours),
+.floormap[data-highlight='partial'] .room:not(.room--partial),
+.floormap[data-highlight='taken'] .room:not(.room--taken),
+.floormap[data-highlight='free'] .room:not(.room--free),
+.floormap[data-highlight='unsuitable'] .room:not(.room--unsuitable),
+.b3d-labels[data-highlight='fits'] .b3d-label:not(.b3d-label--fits),
+.b3d-labels[data-highlight='yours'] .b3d-label:not(.b3d-label--yours),
+.b3d-labels[data-highlight='partial'] .b3d-label:not(.b3d-label--partial),
+.b3d-labels[data-highlight='taken'] .b3d-label:not(.b3d-label--taken),
+.b3d-labels[data-highlight='free'] .b3d-label:not(.b3d-label--free),
+.b3d-labels[data-highlight='unsuitable'] .b3d-label:not(.b3d-label--unsuitable) {
+  opacity: 0.18;
+}
+
+/* ---------- 2D / 3D ---------- */
+.view-toggle {
+  display: inline-flex;
+  padding: 3px;
+  background: var(--plate);
+  border-radius: 12px;
+}
+.view-toggle__btn {
+  min-height: 30px;
+  min-width: 40px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+}
+.view-toggle__btn[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgb(24 24 26 / 15%);
+}
+.building3d {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 940 / 550;
+  max-height: calc(100dvh - 428px);
+  min-height: 240px;
+  margin: 0 auto;
+  border-radius: 10px;
+  overflow: hidden;
+  animation: fade-in 0.3s ease-out;
+}
+.building3d canvas {
+  touch-action: none;
+  cursor: grab; /* drag turns the building; rooms switch to a pointer on hover */
+  outline: none;
+}
+.building3d canvas:active {
+  cursor: grabbing;
+}
+.building3d canvas:focus-visible {
+  box-shadow: inset 0 0 0 3px var(--brand-text);
+}
+.building3d .map-zoom {
+  z-index: 4; /* above the room labels */
+}
+.map-zoom .b3d-spin {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.map-zoom .b3d-spin.is-on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
+}
+.b3d-compass {
+  display: grid;
+  place-items: center;
+}
+.building3d--loading {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: linear-gradient(180deg, #fff, var(--page));
+  perspective: 900px;
+}
+.building3d__hint {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: rgb(255 255 255 / 85%);
+  padding: 4px 10px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+.b3d-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.b3d-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 3px 9px 3px 6px;
+  border-radius: 12px;
+  border: 1px solid rgb(24 24 26 / 14%);
+  background: rgb(255 255 255 / 94%);
+  box-shadow: 0 2px 8px rgb(24 24 26 / 18%);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+  will-change: transform;
+}
+.b3d-label:hover,
+.b3d-label.is-hovered,
+.b3d-label:focus-visible {
+  z-index: 2;
+  border-color: var(--ink);
+  box-shadow: 0 3px 12px rgb(24 24 26 / 30%);
+}
+.b3d-label.is-selected {
+  z-index: 3;
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+.b3d-label__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1.5px solid #8a938f;
+}
+.b3d-label--fits .b3d-label__dot,
+.b3d-label--free .b3d-label__dot {
+  background: var(--green);
+  border-color: var(--green);
+}
+.b3d-label--fits {
+  border-color: var(--green);
+}
+.b3d-label--partial .b3d-label__dot {
+  background: var(--orange);
+  border-color: var(--orange);
+}
+.b3d-label--taken .b3d-label__dot {
+  background: var(--red);
+  border-color: var(--red);
+}
+.b3d-label--taken {
+  color: var(--muted);
+}
+.b3d-label--yours {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+.b3d-label--yours .b3d-label__dot {
+  background: #fff;
+  border-color: #fff;
+}
+.b3d-label--yours .b3d-label__seats {
+  color: rgb(255 255 255 / 80%);
+}
+.b3d-label__rank {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--green);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-map);
+  font-size: 12px;
+}
+.b3d-label__seats {
+  font-weight: 600;
+  color: var(--muted);
+}
+.b3d-label__seats::before {
+  content: '·';
+  margin-right: 4px;
+}
+.building3d__fallback {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  margin: 0;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+}
+.flip-in {
+  perspective: 900px;
+}
+.flip-in > .card {
+  animation: flip-in 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  transform-origin: center left;
+  backface-visibility: hidden;
+}
+@keyframes flip-in {
+  from {
+    opacity: 0;
+    transform: rotateY(-75deg) translateZ(0);
+  }
+  to {
+    opacity: 1;
+    transform: rotateY(0deg);
+  }
+}
+
+/* ---------- Owner names (who has the room at the selected time) ---------- */
+.room .sub--owner {
+  fill: var(--ink);
+  font-weight: 700;
+}
+.room--yours .sub--owner {
+  fill: #fff;
+}
+.b3d-label__row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.b3d-label__owner {
+  padding-left: 14px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.b3d-label--yours .b3d-label__owner {
+  color: rgb(255 255 255 / 85%);
+}
+.timeline__who {
+  margin: 0 3px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 88%);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+.timeline__busy--mine .timeline__who {
+  background: transparent;
+  color: #fff;
+}
+
+/* ---------- Timeline ---------- */
+.timeline {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: 8px 14px 6px;
+}
+.timeline__head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 12px;
+  font-size: 14px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.timeline__shifts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.timeline__shifts span {
+  padding-left: 6px;
+  border-left: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.timeline__head strong {
+  color: var(--ink);
+}
+.timeline__track {
+  position: relative;
+  height: 30px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--page);
+}
+.timeline__shift {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--line);
+}
+.timeline__shift:nth-child(2) {
+  background: rgb(24 24 26 / 3%);
+}
+.timeline__busy {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  top: 5px;
+  bottom: 5px;
+  border-radius: 5px;
+  background: repeating-linear-gradient(135deg, #c9d0cc 0 4px, #dfe4e1 4px 8px);
+  border: 1px solid #b4bcb8;
+}
+.timeline__busy--mine {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.timeline__slot {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  border: 2px solid var(--brand-text);
+  border-radius: 7px;
+  background: rgb(31 95 214 / 12%);
+}
+.timeline__now {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--danger);
+}
+.timeline__labels {
+  position: relative;
+  height: 18px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.timeline__labels span {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.timeline__labels span:first-child {
+  transform: none;
+}
+.timeline__labels span:last-child {
+  transform: translateX(-100%);
+}

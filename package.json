@@ -1,0 +1,41 @@
+{
+  "name": "reph-room-assistant",
+  "version": "0.2.0",
+  "private": true,
+  "description": "AI room reservation assistant (OpenAI) with a live floor map for REPH Bldg. H and Iloilo",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "package:ec2": "bash deploy/ec2/package.sh",
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "ask": "tsx scripts/ask.ts",
+    "evals": "tsx scripts/evals.ts",
+    "hash-password": "tsx scripts/hash-password.ts",
+    "e2e": "playwright test",
+    "spec:sync": "tsx scripts/spec-verbatim.ts",
+    "spec:check": "tsx scripts/spec-verbatim.ts --check"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.186.0",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@openai/agents": "^0.18.0",
+    "@react-three/fiber": "^9.8.1",
+    "@tanstack/react-query": "^5.103.3",
+    "next": "^16.3.6",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "three": "^0.186.1",
+    "zod": "^4.6.5"
+  }
+}

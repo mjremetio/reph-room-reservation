@@ -1,0 +1,44 @@
+{
+  "name": "empty",
+  "description": "No bookings (MOCK_SCENARIO=empty, the owner's choice for real use on 1 Oct 2026). The people are the sign-in accounts (src/config/accounts.ts, checked by a test): no test bookings and no Tester people.",
+  "now": "2026-10-01T09:00:00+08:00",
+  "demoUser": {
+    "name": "Remetio, Mark Joseph",
+    "email": "markjoseph.remetio@lexisnexis.com",
+    "division": "Sales"
+  },
+  "capacityOverrides": {},
+  "people": [
+    {
+      "name": "Remetio, Mark Joseph",
+      "email": "markjoseph.remetio@lexisnexis.com",
+      "division": "Sales"
+    },
+    {
+      "name": "Sandoval, Jeremiah",
+      "email": "jeremiah.sandoval@lexisnexis.com"
+    },
+    {
+      "name": "Lagunoy, Lili",
+      "email": "lili.lagunoy@lexisnexis.com"
+    },
+    {
+      "name": "Kim, Tae Hwan S.",
+      "email": "taehwan.kim@reedelsevier.com"
+    },
+    {
+      "name": "Villagracia, Albert",
+      "email": "albert.villagracia@reedelsevier.com"
+    },
+    {
+      "name": "Account, Dummy",
+      "email": "dummy.account@example.com",
+      "division": "External Judge"
+    },
+    {
+      "name": "Tester, Admin",
+      "email": "admin.test@email.com"
+    }
+  ],
+  "bookings": []
+}
