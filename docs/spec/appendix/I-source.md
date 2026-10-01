@@ -3631,6 +3631,13 @@ export function formatManila(d: Date): string {
   return dateTime.format(d);
 }
 
+const fullDate = new Intl.DateTimeFormat('en-US', { timeZone: MANILA_TZ, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+/** "Thursday, October 1, 2026 (2026-10-01), 4:27 PM": today in Manila with the weekday and the year, for the assistants. */
+export function formatManilaNow(d: Date): string {
+  return `${fullDate.format(d)} (${manilaDateKey(d)}), ${timeOnly.format(d)}`;
+}
+
 /** "Mon, Sep 28, 3:00 PM – 4:00 PM", with the end date when the booking crosses midnight. */
 export function formatRange(start: Date, end: Date): string {
   const sameDay = manilaStartOfDay(start).getTime() === manilaStartOfDay(addMinutes(end, -1)).getTime();
@@ -4805,6 +4812,7 @@ import { RunContext } from '@openai/agents';
 import type { AssistantContext, UiEvent } from '../agent/context';
 import { roomTools } from '../agent/tools';
 import { RULES } from '../domain/rules';
+import { formatManilaNow } from '../domain/time';
 import type { Requestor } from '../gateway/ReservationGateway';
 import { now } from '../lib/clock';
 
@@ -4812,7 +4820,7 @@ export const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 export const INSTRUCTIONS = [
   'REPH Room Assistant: meeting and training rooms at Reed Elsevier Philippines, Bldg. H, Manila (2F and 3F), for the signed-in person.',
-  'Times are Asia/Manila (UTC+8); pass ISO 8601 with the +08:00 offset.',
+  'Times are Asia/Manila (UTC+8, PHT); pass ISO 8601 with the +08:00 offset. Every tool result has `now`, the current date and time in Manila: count "today", "tomorrow" and weekdays from it, not from your own clock.',
   'Call find_rooms before saying a room is free, and room_schedule for who booked a room and when.',
   `propose_booking and request_cancellation only prepare: give the person the confirm_url; nothing is booked or cancelled until they press Confirm there (within ${RULES.linkProposalHoldMinutes} minutes).`,
   `Agenda titles must be specific ("Q4 pipeline review"), not just "Meeting" or "Training". One room per person at a time, except ${RULES.severalRoomsAtOnce.join(' and ')} bookings (several at once are fine).`,
@@ -4890,8 +4898,10 @@ async function callTool(name: string, args: Record<string, unknown>, user: Reque
   const context: AssistantContext = { user, now: now(), defaultSite: 'Manila', emit: (e) => events.push(e), proposalHoldMinutes: RULES.linkProposalHoldMinutes };
   try {
     const raw = await tool.invoke(new RunContext(context), JSON.stringify(withNulls(tool.parameters as Schema, args)));
-    const out = forClient(raw, events, origin);
-    const failed = !!out && typeof out === 'object' && (out as { ok?: unknown }).ok === false;
+    const result = forClient(raw, events, origin);
+    const failed = !!result && typeof result === 'object' && (result as { ok?: unknown }).ok === false;
+    // The AI app's own clock may be in another time zone: every answer says what "now" is in Manila.
+    const out = result && typeof result === 'object' && !Array.isArray(result) ? { ...result, now: `${formatManilaNow(context.now)} PHT (Asia/Manila, UTC+8)` } : result;
     return { content: [{ type: 'text', text: JSON.stringify(out) }], isError: failed };
   } catch (error) {
     return { content: [{ type: 'text', text: `That did not work: ${error instanceof Error ? error.message : 'unknown error'}. Check the arguments against the tool's schema.` }], isError: true };
@@ -14227,6 +14237,14 @@ import { buildInstructions } from '../instructions';
 
 const ctx = { user: { name: 'Remetio, Mark Joseph', email: 'markjoseph.remetio@lexisnexis.com', login: 'MARKJOSEPH.REMETIO', division: 'Sales' }, now: manila(2026, 9, 28, 9), defaultSite: 'Manila' as const, emit: () => {} };
 
+test('both assistants know today in Manila, with the weekday and the year, and to count from it', async () => {
+  const { buildAdminInstructions } = await import('../adminAgent');
+  for (const text of [buildInstructions(ctx), buildAdminInstructions(ctx)]) {
+    assert.ok(text.includes('Today is Monday, September 28, 2026 (2026-09-28), 9:00 AM in Asia/Manila (UTC+8, PHT)'), text.slice(0, 400));
+    assert.ok(text.includes('dates without a year from it, in Asia/Manila whatever'));
+  }
+});
+
 test('the assistant carries the guidelines knowledge', () => {
   const text = buildInstructions(ctx);
   assert.ok(text.includes(GUIDELINES));
@@ -16295,6 +16313,8 @@ test('connect, list the tools and use them as the signed-in person', async () =>
   assert.equal(found.isError, false);
   assert.equal(found.data.flow, 'A');
   assert.equal(found.data.fully_free[0].room, 'Amsterdam, 2F');
+  // Every answer says what "now" is in Manila, with the year, so the AI app never counts days from its own clock.
+  assert.match(found.data.now, /^Monday, September 28, 2026 \(2026-09-28\), 9:\d\d AM PHT \(Asia\/Manila, UTC\+8\)$/);
 
   const schedule = await call(token, 'room_schedule', { room: 'Central Park', start: '2026-09-28T00:00:00+08:00', end: '2026-09-29T00:00:00+08:00' });
   assert.equal(schedule.data.rooms[0].booked[0].owner, 'Tester, Alpha');

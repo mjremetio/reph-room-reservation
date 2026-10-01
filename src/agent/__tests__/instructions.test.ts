@@ -7,6 +7,14 @@ import { buildInstructions } from '../instructions';
 
 const ctx = { user: { name: 'Remetio, Mark Joseph', email: 'markjoseph.remetio@lexisnexis.com', login: 'MARKJOSEPH.REMETIO', division: 'Sales' }, now: manila(2026, 9, 28, 9), defaultSite: 'Manila' as const, emit: () => {} };
 
+test('both assistants know today in Manila, with the weekday and the year, and to count from it', async () => {
+  const { buildAdminInstructions } = await import('../adminAgent');
+  for (const text of [buildInstructions(ctx), buildAdminInstructions(ctx)]) {
+    assert.ok(text.includes('Today is Monday, September 28, 2026 (2026-09-28), 9:00 AM in Asia/Manila (UTC+8, PHT)'), text.slice(0, 400));
+    assert.ok(text.includes('dates without a year from it, in Asia/Manila whatever'));
+  }
+});
+
 test('the assistant carries the guidelines knowledge', () => {
   const text = buildInstructions(ctx);
   assert.ok(text.includes(GUIDELINES));

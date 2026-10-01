@@ -62,6 +62,13 @@ export function formatManila(d: Date): string {
   return dateTime.format(d);
 }
 
+const fullDate = new Intl.DateTimeFormat('en-US', { timeZone: MANILA_TZ, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+/** "Thursday, October 1, 2026 (2026-10-01), 4:27 PM": today in Manila with the weekday and the year, for the assistants. */
+export function formatManilaNow(d: Date): string {
+  return `${fullDate.format(d)} (${manilaDateKey(d)}), ${timeOnly.format(d)}`;
+}
+
 /** "Mon, Sep 28, 3:00 PM – 4:00 PM", with the end date when the booking crosses midnight. */
 export function formatRange(start: Date, end: Date): string {
   const sameDay = manilaStartOfDay(start).getTime() === manilaStartOfDay(addMinutes(end, -1)).getTime();

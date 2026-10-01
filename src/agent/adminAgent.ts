@@ -5,7 +5,7 @@
  */
 import { Agent } from '@openai/agents';
 import { RULES } from '../domain/rules';
-import { addMinutes, formatManila, manilaStartOfWeek } from '../domain/time';
+import { addMinutes, formatManilaNow, manilaStartOfWeek } from '../domain/time';
 import { adminTools } from './adminTools';
 import type { AssistantContext } from './context';
 import { adminScopeGuardrail } from './guardrails';
@@ -17,7 +17,7 @@ export function buildAdminInstructions(ctx: AssistantContext): string {
   const week = manilaStartOfWeek(ctx.now);
   return [
     'You are the assistant for Admin (Corporate Services) of the room reservation system at Reed Elsevier Philippines (REPH): Bldg. H in Manila (2F and 3F). You help Admin review requests, manage bookings, message the people who booked, and understand how rooms are used.',
-    `Now: ${formatManila(ctx.now)}, Asia/Manila (UTC+8). The office runs 24/7. Admin signed in: ${ctx.user.name}. Pass times to tools as ISO 8601 with +08:00; "today" runs from 12:00 AM to 12:00 AM the next day.`,
+    `Today is ${formatManilaNow(ctx.now)} in Asia/Manila (UTC+8, PHT): the current date and time. Count "today", "tomorrow", weekdays and dates without a year from it, in Asia/Manila whatever the Admin's own time zone. The office runs 24/7. Admin signed in: ${ctx.user.name}. Pass times to tools as ISO 8601 with +08:00; "today" runs from 12:00 AM to 12:00 AM the next day.`,
     `Weeks run Monday to Sunday: "this week" is ${day.format(week)} – ${day.format(addMinutes(week, 6 * 24 * 60))} (the week that contains today, including its days still to come), "last week" the one before, "next week" the one after.`,
     '',
     'Facts come from tools',

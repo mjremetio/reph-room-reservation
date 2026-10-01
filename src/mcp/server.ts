@@ -10,6 +10,7 @@ import { RunContext } from '@openai/agents';
 import type { AssistantContext, UiEvent } from '../agent/context';
 import { roomTools } from '../agent/tools';
 import { RULES } from '../domain/rules';
+import { formatManilaNow } from '../domain/time';
 import type { Requestor } from '../gateway/ReservationGateway';
 import { now } from '../lib/clock';
 
@@ -17,7 +18,7 @@ export const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 export const INSTRUCTIONS = [
   'REPH Room Assistant: meeting and training rooms at Reed Elsevier Philippines, Bldg. H, Manila (2F and 3F), for the signed-in person.',
-  'Times are Asia/Manila (UTC+8); pass ISO 8601 with the +08:00 offset.',
+  'Times are Asia/Manila (UTC+8, PHT); pass ISO 8601 with the +08:00 offset. Every tool result has `now`, the current date and time in Manila: count "today", "tomorrow" and weekdays from it, not from your own clock.',
   'Call find_rooms before saying a room is free, and room_schedule for who booked a room and when.',
   `propose_booking and request_cancellation only prepare: give the person the confirm_url; nothing is booked or cancelled until they press Confirm there (within ${RULES.linkProposalHoldMinutes} minutes).`,
   `Agenda titles must be specific ("Q4 pipeline review"), not just "Meeting" or "Training". One room per person at a time, except ${RULES.severalRoomsAtOnce.join(' and ')} bookings (several at once are fine).`,
@@ -95,8 +96,10 @@ async function callTool(name: string, args: Record<string, unknown>, user: Reque
   const context: AssistantContext = { user, now: now(), defaultSite: 'Manila', emit: (e) => events.push(e), proposalHoldMinutes: RULES.linkProposalHoldMinutes };
   try {
     const raw = await tool.invoke(new RunContext(context), JSON.stringify(withNulls(tool.parameters as Schema, args)));
-    const out = forClient(raw, events, origin);
-    const failed = !!out && typeof out === 'object' && (out as { ok?: unknown }).ok === false;
+    const result = forClient(raw, events, origin);
+    const failed = !!result && typeof result === 'object' && (result as { ok?: unknown }).ok === false;
+    // The AI app's own clock may be in another time zone: every answer says what "now" is in Manila.
+    const out = result && typeof result === 'object' && !Array.isArray(result) ? { ...result, now: `${formatManilaNow(context.now)} PHT (Asia/Manila, UTC+8)` } : result;
     return { content: [{ type: 'text', text: JSON.stringify(out) }], isError: failed };
   } catch (error) {
     return { content: [{ type: 'text', text: `That did not work: ${error instanceof Error ? error.message : 'unknown error'}. Check the arguments against the tool's schema.` }], isError: true };

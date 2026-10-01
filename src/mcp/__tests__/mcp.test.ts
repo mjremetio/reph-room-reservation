@@ -121,6 +121,8 @@ test('connect, list the tools and use them as the signed-in person', async () =>
   assert.equal(found.isError, false);
   assert.equal(found.data.flow, 'A');
   assert.equal(found.data.fully_free[0].room, 'Amsterdam, 2F');
+  // Every answer says what "now" is in Manila, with the year, so the AI app never counts days from its own clock.
+  assert.match(found.data.now, /^Monday, September 28, 2026 \(2026-09-28\), 9:\d\d AM PHT \(Asia\/Manila, UTC\+8\)$/);
 
   const schedule = await call(token, 'room_schedule', { room: 'Central Park', start: '2026-09-28T00:00:00+08:00', end: '2026-09-29T00:00:00+08:00' });
   assert.equal(schedule.data.rooms[0].booked[0].owner, 'Tester, Alpha');

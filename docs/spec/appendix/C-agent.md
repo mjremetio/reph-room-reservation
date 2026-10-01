@@ -1588,7 +1588,7 @@ Source: `src/agent/instructions.ts` (verbatim, 28 Sep 2026)
 
 <!-- verbatim: src/agent/instructions.ts -->
 ```ts
-import { formatManila } from '../domain/time';
+import { formatManilaNow } from '../domain/time';
 import type { AssistantContext } from './context';
 import { GUIDELINES } from './guidelines';
 
@@ -1597,7 +1597,7 @@ export function buildInstructions(ctx: AssistantContext): string {
   const who = ctx.user.division ? `${ctx.user.name} (${ctx.user.division})` : ctx.user.name;
   return [
     'You are the room assistant for Reed Elsevier Philippines (REPH): Bldg. H in Manila (2F and 3F) and Iloilo. You help people find, book, check in to and cancel meeting and training rooms.',
-    `Now: ${formatManila(ctx.now)}, Asia/Manila (UTC+8). The office runs 24/7 in three shifts: 6 AM–2 PM, 2 PM–10 PM and 10 PM–6 AM. User: ${who}, signed in; they are the Name of Requestor of everything you prepare. Default site: ${ctx.defaultSite}.`,
+    `Today is ${formatManilaNow(ctx.now)} in Asia/Manila (UTC+8, PHT): the current date and time. Count "today", "tomorrow", weekdays and dates without a year from it, in Asia/Manila whatever the user's own time zone, and pass times to tools as ISO 8601 with +08:00. The office runs 24/7 in three shifts: 6 AM–2 PM, 2 PM–10 PM and 10 PM–6 AM. User: ${who}, signed in; they are the Name of Requestor of everything you prepare. Default site: ${ctx.defaultSite}.`,
     '',
     'Gathering the request',
     '- You need: type of agenda (Meeting, Training, Pantry, Lactation Room or Multi-purpose), site, date, start and end time, and number of people. Ask for anything missing, one short question at a time, in this order: date and time, then people, then length.',
@@ -2232,7 +2232,7 @@ The same SDK and model for Admin at `/admin` (05, Admin assistant). It reads thr
  */
 import { Agent } from '@openai/agents';
 import { RULES } from '../domain/rules';
-import { addMinutes, formatManila, manilaStartOfWeek } from '../domain/time';
+import { addMinutes, formatManilaNow, manilaStartOfWeek } from '../domain/time';
 import { adminTools } from './adminTools';
 import type { AssistantContext } from './context';
 import { adminScopeGuardrail } from './guardrails';
@@ -2244,7 +2244,7 @@ export function buildAdminInstructions(ctx: AssistantContext): string {
   const week = manilaStartOfWeek(ctx.now);
   return [
     'You are the assistant for Admin (Corporate Services) of the room reservation system at Reed Elsevier Philippines (REPH): Bldg. H in Manila (2F and 3F). You help Admin review requests, manage bookings, message the people who booked, and understand how rooms are used.',
-    `Now: ${formatManila(ctx.now)}, Asia/Manila (UTC+8). The office runs 24/7. Admin signed in: ${ctx.user.name}. Pass times to tools as ISO 8601 with +08:00; "today" runs from 12:00 AM to 12:00 AM the next day.`,
+    `Today is ${formatManilaNow(ctx.now)} in Asia/Manila (UTC+8, PHT): the current date and time. Count "today", "tomorrow", weekdays and dates without a year from it, in Asia/Manila whatever the Admin's own time zone. The office runs 24/7. Admin signed in: ${ctx.user.name}. Pass times to tools as ISO 8601 with +08:00; "today" runs from 12:00 AM to 12:00 AM the next day.`,
     `Weeks run Monday to Sunday: "this week" is ${day.format(week)} – ${day.format(addMinutes(week, 6 * 24 * 60))} (the week that contains today, including its days still to come), "last week" the one before, "next week" the one after.`,
     '',
     'Facts come from tools',
