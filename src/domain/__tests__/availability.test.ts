@@ -29,7 +29,7 @@ test('cancelled bookings and expired holds do not block; live holds do', () => {
 });
 
 test('ownConflicts: the same person in any room at an overlapping time, never cancelled ones or other people', () => {
-  const want = { start: manila(2026, 9, 28, 15), end: manila(2026, 9, 28, 16) };
+  const want = { start: manila(2026, 9, 28, 15), end: manila(2026, 9, 28, 16), agendaType: 'Meeting' as const };
   const other = { ...owner, name: 'Tester, Bravo', email: 'bravo@example.com' };
   const bookings = [
     booking('tokyo', manila(2026, 9, 28, 15, 30), manila(2026, 9, 28, 16, 30), { ticketNo: 'RM-1' }),
@@ -42,6 +42,21 @@ test('ownConflicts: the same person in any room at an overlapping time, never ca
     ['RM-1'],
   );
   assert.deepEqual(ownConflicts('nobody@example.com', want, bookings, now), []);
+});
+
+test("ownConflicts: Training and Multi-purpose bookings may be held several at once (the owner's request)", () => {
+  const at = { start: manila(2026, 9, 28, 15), end: manila(2026, 9, 28, 16) };
+  const meeting = booking('amsterdam', at.start, at.end, { ticketNo: 'RM-M' });
+  const training = booking('snowdon', at.start, at.end, { ticketNo: 'RM-T', agendaType: 'Training' });
+  const hall = booking('mph1', at.start, at.end, { ticketNo: 'RM-H', agendaType: 'Multi-purpose' });
+  const mine = [meeting, training, hall];
+  // A new Training or Multi-purpose booking clashes with nothing of theirs, not even a meeting.
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Training' }, mine, now), []);
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Multi-purpose' }, mine, now), []);
+  // A new Meeting or Lactation Room booking clashes with their meeting only: their training and hall don't count.
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Meeting' }, mine, now).map((b) => b.ticketNo), ['RM-M']);
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Lactation Room' }, mine, now).map((b) => b.ticketNo), ['RM-M']);
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Meeting' }, [training, hall], now), []);
 });
 
 test('flow B: partly free returns the free part and who has the rest', () => {

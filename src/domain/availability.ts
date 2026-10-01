@@ -1,5 +1,6 @@
 import { sameEmail } from './people';
-import type { Booking, Interval } from './types';
+import { countsForOneRoom } from './rules';
+import type { AgendaType, Booking, Interval } from './types';
 import { addMinutes, minutesBetween } from './time';
 
 /** Booking statuses that occupy a room. A "Held" proposal only blocks until it expires. */
@@ -26,10 +27,14 @@ export function conflictsFor(roomId: string, want: Interval, bookings: Booking[]
     .sort((x, y) => x.start.getTime() - y.start.getTime());
 }
 
-/** The person's own bookings (any room) that overlap `want` and still hold their room (RULES.oneRoomPerPersonAtATime). */
-export function ownConflicts(email: string, want: Interval, bookings: Booking[], now: Date): Booking[] {
+/**
+ * The person's own bookings (any room) that overlap `want` and still hold their room (RULES.oneRoomPerPersonAtATime).
+ * Training and Multi-purpose bookings may be held several at once: they neither clash nor count (countsForOneRoom).
+ */
+export function ownConflicts(email: string, want: Interval & { agendaType: AgendaType }, bookings: Booking[], now: Date): Booking[] {
+  if (!countsForOneRoom(want.agendaType)) return [];
   return bookings
-    .filter((b) => sameEmail(b.owner.email, email) && isBlocking(b, now) && overlaps(want, b))
+    .filter((b) => countsForOneRoom(b.agendaType) && sameEmail(b.owner.email, email) && isBlocking(b, now) && overlaps(want, b))
     .sort((x, y) => x.start.getTime() - y.start.getTime());
 }
 

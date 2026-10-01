@@ -185,3 +185,26 @@ test('Admin swaps the rooms of two bookings in one step, and edits room details'
   assert.equal((await gw.listRooms()).find((r) => r.id === 'capetown')?.notes, 'New screen');
   await assert.rejects(gw.updateRoom('capetown', { capacity: 7 }, alpha), NotAllowedError);
 });
+
+test('one room per person leaves out Training and Multi-purpose: a person may hold several of those at once', async () => {
+  const gw = emptyGateway();
+  const training = (roomId: string) => ({ ...request(roomId, mark, 10), agendaType: 'Training' as const });
+  const hall = (roomId: string) => ({ ...request(roomId, mark, 40), agendaType: 'Multi-purpose' as const });
+  await gw.createBooking(training('snowdon'));
+  await gw.createBooking(training('denali'));
+  await gw.createBooking(hall('mph1'));
+  await gw.createBooking(hall('mph2'));
+  // A meeting then too: Training and Multi-purpose bookings don't count. A second meeting does.
+  await gw.createBooking(request('capetown'));
+  await assert.rejects(gw.createBooking(request('amsterdam')), (err: unknown) => err instanceof ConflictError && err.kind === 'requester' && err.conflicts[0]?.roomId === 'capetown');
+  // A room still holds one booking at a time.
+  await assert.rejects(gw.createBooking(training('snowdon')), (err: unknown) => err instanceof ConflictError && err.kind === 'room');
+});
+
+test('an Admin change of type checks the owner again: a Training may overlap their meeting, a Meeting may not', async () => {
+  const gw = emptyGateway();
+  await gw.createBooking(request('capetown'));
+  const t = await gw.createBooking({ ...request('johannesburg'), agendaType: 'Training' });
+  await assert.rejects(gw.updateBooking(t.ticketNo, { agendaType: 'Meeting' }, admin), (e: unknown) => e instanceof ConflictError && e.kind === 'requester');
+  assert.equal((await gw.updateBooking(t.ticketNo, { agenda: 'Excel basics' }, admin)).agendaType, 'Training', 'other changes still work');
+});

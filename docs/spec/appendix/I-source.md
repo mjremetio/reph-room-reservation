@@ -2808,7 +2808,8 @@ export function swapOptionsFor(blocking: Booking, rooms: Room[], bookings: Booki
 <!-- verbatim: src/domain/availability.ts -->
 ```ts
 import { sameEmail } from './people';
-import type { Booking, Interval } from './types';
+import { countsForOneRoom } from './rules';
+import type { AgendaType, Booking, Interval } from './types';
 import { addMinutes, minutesBetween } from './time';
 
 /** Booking statuses that occupy a room. A "Held" proposal only blocks until it expires. */
@@ -2835,10 +2836,14 @@ export function conflictsFor(roomId: string, want: Interval, bookings: Booking[]
     .sort((x, y) => x.start.getTime() - y.start.getTime());
 }
 
-/** The person's own bookings (any room) that overlap `want` and still hold their room (RULES.oneRoomPerPersonAtATime). */
-export function ownConflicts(email: string, want: Interval, bookings: Booking[], now: Date): Booking[] {
+/**
+ * The person's own bookings (any room) that overlap `want` and still hold their room (RULES.oneRoomPerPersonAtATime).
+ * Training and Multi-purpose bookings may be held several at once: they neither clash nor count (countsForOneRoom).
+ */
+export function ownConflicts(email: string, want: Interval & { agendaType: AgendaType }, bookings: Booking[], now: Date): Booking[] {
+  if (!countsForOneRoom(want.agendaType)) return [];
   return bookings
-    .filter((b) => sameEmail(b.owner.email, email) && isBlocking(b, now) && overlaps(want, b))
+    .filter((b) => countsForOneRoom(b.agendaType) && sameEmail(b.owner.email, email) && isBlocking(b, now) && overlaps(want, b))
     .sort((x, y) => x.start.getTime() - y.start.getTime());
 }
 
@@ -3328,6 +3333,11 @@ export const RULES = {
    */
   oneRoomPerPersonAtATime: true,
   /**
+   * The owner's request (1 Oct 2026): these Types of agenda may be held several at a time (a training in Snowdon and
+   * Denali, an event in MPH 1 and MPH 2), so they don't count for one room per person, either way (countsForOneRoom).
+   */
+  severalRoomsAtOnce: ['Training', 'Multi-purpose'] as AgendaType[],
+  /**
    * Our own rule (Admin pages, 30 Sep 2026): the checks Admin may set aside when changing a booking. The self-service
    * booking window, Admin-only rooms (Admin books the visitor offices, Guidelines p.11) and the Urgent hint.
    * OPEN: which rules bind Admin in the tool? The rest (times, participants, agenda, training shift, clashes, and the
@@ -3335,6 +3345,14 @@ export const RULES = {
    */
   adminMayOverride: ['TOO_FAR_AHEAD', 'NOT_SELF_BOOKABLE', 'URGENT_NOT_ALLOWED'] as IssueCode[],
 };
+
+/**
+ * Whether a booking of this type counts for one room per person at a time: neither blocked by the person's other
+ * bookings nor blocking them when it doesn't (RULES.severalRoomsAtOnce).
+ */
+export function countsForOneRoom(agendaType: AgendaType): boolean {
+  return RULES.oneRoomPerPersonAtATime && !RULES.severalRoomsAtOnce.includes(agendaType);
+}
 
 /** The status a new booking gets from the tool: "In Progress" while it waits for Admin (RULES.needsApproval), else Approved. */
 export function initialStatus(agendaType: AgendaType): BookingStatus {
@@ -4225,7 +4243,7 @@ export class MockGateway implements ReservationGateway {
     const conflicts = dates.flatMap((d) => conflictsFor(req.roomId, d, this.bookings, this.now()));
     if (conflicts.length > 0) throw new ConflictError(conflicts.map(clone));
     if (RULES.oneRoomPerPersonAtATime && req.requester.email) {
-      const own = dates.flatMap((d) => ownConflicts(req.requester.email as string, d, this.bookings, this.now()));
+      const own = dates.flatMap((d) => ownConflicts(req.requester.email as string, { ...d, agendaType: req.agendaType }, this.bookings, this.now()));
       if (own.length > 0) throw new ConflictError(own.map(clone), 'requester');
     }
     const created: Booking[] = dates.map((d) => ({
@@ -4326,7 +4344,8 @@ export class MockGateway implements ReservationGateway {
       if (wrong) throw new NotAllowedError(wrong.message);
     }
     const others = this.bookings.filter((x) => x !== b);
-    this.assertFits(next, others, next.start.getTime() !== b.start.getTime() || next.end.getTime() !== b.end.getTime());
+    // A new time, or a new type (a Training may overlap the owner's meeting; a Meeting may not), checks the owner again.
+    this.assertFits(next, others, next.start.getTime() !== b.start.getTime() || next.end.getTime() !== b.end.getTime() || next.agendaType !== b.agendaType);
     Object.assign(b, set);
     // Type of Training belongs to training bookings only (RULES: Type of Training); On-Site unless Virtual.
     if (b.agendaType === 'Training') b.trainingType ??= 'On-Site';
@@ -4372,11 +4391,11 @@ export class MockGateway implements ReservationGateway {
     return { ...r };
   }
 
-  /** The room is free for `next` and, when its time moved, its owner holds no other room then (one room per person). */
-  private assertFits(next: Booking, others: Booking[], timeMoved: boolean): void {
+  /** The room is free for `next` and, when its time or type changed, its owner holds no other room then (one room per person). */
+  private assertFits(next: Booking, others: Booking[], recheckOwner: boolean): void {
     const conflicts = conflictsFor(next.roomId, next, others, this.now());
     if (conflicts.length > 0) throw new ConflictError(conflicts.map(clone));
-    if (timeMoved && RULES.oneRoomPerPersonAtATime && next.owner.email) {
+    if (recheckOwner && RULES.oneRoomPerPersonAtATime && next.owner.email) {
       const own = ownConflicts(next.owner.email, next, others, this.now());
       if (own.length > 0) throw new ConflictError(own.map(clone), 'requester');
     }
@@ -4796,7 +4815,7 @@ export const INSTRUCTIONS = [
   'Times are Asia/Manila (UTC+8); pass ISO 8601 with the +08:00 offset.',
   'Call find_rooms before saying a room is free, and room_schedule for who booked a room and when.',
   `propose_booking and request_cancellation only prepare: give the person the confirm_url; nothing is booked or cancelled until they press Confirm there (within ${RULES.linkProposalHoldMinutes} minutes).`,
-  'Agenda titles must be specific ("Q4 pipeline review"), not just "Meeting" or "Training". One room per person at a time.',
+  `Agenda titles must be specific ("Q4 pipeline review"), not just "Meeting" or "Training". One room per person at a time, except ${RULES.severalRoomsAtOnce.join(' and ')} bookings (several at once are fine).`,
   "Share only the owner's name, division, time, group size and status of other people's bookings.",
 ].join(' ');
 
@@ -5226,15 +5245,16 @@ export function clash(kind: 'room' | 'requester', conflicts: Booking[], rooms: R
 }
 
 /**
- * Whether `next` fits: its room free then (apart from `except`) and, when its time moved, its owner holding no other
- * room then (one room per person). A booking that keeps its time can't create a new overlap for its owner.
+ * Whether `next` fits: its room free then (apart from `except`) and, when its time or type changed, its owner holding
+ * no other room then (one room per person; a Training or Multi-purpose booking may overlap, countsForOneRoom). A booking
+ * that keeps its time and type can't create a new overlap for its owner.
  */
-async function fits(gw: ReservationGateway, next: Booking, except: Booking[], rooms: Room[], now: Date, timeMoved: boolean): Promise<Failed | null> {
+async function fits(gw: ReservationGateway, next: Booking, except: Booking[], rooms: Room[], now: Date, recheckOwner: boolean): Promise<Failed | null> {
   const skip = (b: Booking) => except.some((x) => x.ticketNo === b.ticketNo);
   const around = (await gw.getBookings({ roomIds: [next.roomId], from: next.start, to: next.end })).filter((b) => !skip(b));
   const taken = conflictsFor(next.roomId, next, around, now);
   if (taken.length > 0) return clash('room', taken, rooms);
-  if (timeMoved && RULES.oneRoomPerPersonAtATime && next.owner.email) {
+  if (recheckOwner && RULES.oneRoomPerPersonAtATime && next.owner.email) {
     const mine = (await gw.listMyBookings(next.owner.email, next.start, next.end)).filter((b) => !skip(b));
     const own = ownConflicts(next.owner.email, next, mine, now);
     if (own.length > 0) return clash('requester', own, rooms);
@@ -5266,8 +5286,8 @@ export async function prepareAdminChange(
   if (blocking.length > 0) {
     return { ok: false, code: 'INVALID', problems: blocking.map((i) => i.message), fields: [...new Set(blocking.map((i) => ISSUE_FIELD[i.code]))] };
   }
-  const timeMoved = after.start.getTime() !== before.start.getTime() || after.end.getTime() !== before.end.getTime();
-  const clashes = await fits(gw, after, [before], rooms, now, timeMoved);
+  const recheckOwner = after.start.getTime() !== before.start.getTime() || after.end.getTime() !== before.end.getTime() || after.agendaType !== before.agendaType;
+  const clashes = await fits(gw, after, [before], rooms, now, recheckOwner);
   return clashes ?? { ok: true, value: { before, after, rooms } };
 }
 
@@ -5427,7 +5447,7 @@ import { HARDWARE_OPTIONS } from '../config/hardware';
 import { availabilityFor, ownConflicts } from '../domain/availability';
 import { sameEmail } from '../domain/people';
 import { describeRecurrence, expandRecurrence, toRecurrenceJson, type Recurrence } from '../domain/recurrence';
-import { ISSUE_FIELD, RULES, validateRequest, type FormField } from '../domain/rules';
+import { countsForOneRoom, ISSUE_FIELD, RULES, validateRequest, type FormField } from '../domain/rules';
 import { formatManila, formatRange } from '../domain/time';
 import type { AgendaType, Interval, Person, Priority, RoomRequest, TrainingType } from '../domain/types';
 import type { ReservationGateway } from '../gateway/ReservationGateway';
@@ -5493,7 +5513,7 @@ export async function prepareBooking(
     const problems = draft.recurrence ? [`${room.name} is not free on ${clashes.length} of ${dates.length} dates.`, ...clashes.slice(0, 5)] : [`${room.name} is no longer free for that whole time.`];
     return { ok: false, code: 'CONFLICT', problems, fields: draft.recurrence ? ['room', 'recurrence'] : ['room', 'time'] };
   }
-  const own = await ownBookingClashes(gw, user.email, dates, now);
+  const own = await ownBookingClashes(gw, user.email, dates, draft.agendaType, now);
   if (own.length > 0) {
     const problems = draft.recurrence
       ? [`One room per person at a time: you already have a room on ${own.length} of ${dates.length} dates.`, ...own.slice(0, 5)]
@@ -5533,14 +5553,15 @@ export async function prepareBooking(
 /**
  * RULES.oneRoomPerPersonAtATime: for each date, the requester's own booking that already holds a room then, e.g.
  * "You already have Tokyo, 2F on Mon, Sep 28, 10:00–11:00 AM (RM-0129902)." Shared with searchRooms' warning.
+ * None for a Training or Multi-purpose booking: those may be held several at once (countsForOneRoom).
  */
-export async function ownBookingClashes(gw: ReservationGateway, email: string, dates: Interval[], now: Date): Promise<string[]> {
-  if (!RULES.oneRoomPerPersonAtATime || dates.length === 0) return [];
+export async function ownBookingClashes(gw: ReservationGateway, email: string, dates: Interval[], agendaType: AgendaType, now: Date): Promise<string[]> {
+  if (!countsForOneRoom(agendaType) || dates.length === 0) return [];
   const mine = await gw.listMyBookings(email, (dates[0] as Interval).start, (dates[dates.length - 1] as Interval).end);
   if (mine.length === 0) return [];
   const rooms = new Map((await gw.listRooms()).map((r) => [r.id, r] as const));
   return dates.flatMap((d) =>
-    ownConflicts(email, d, mine, now).map((b) => {
+    ownConflicts(email, { ...d, agendaType }, mine, now).map((b) => {
       const room = rooms.get(b.roomId);
       const where = room ? `${room.name}, ${room.floor}` : b.roomId;
       return `You already have ${where} on ${formatRange(b.start, b.end)} (${b.ticketNo}).`;
@@ -5798,7 +5819,7 @@ export async function searchRooms(gw: ReservationGateway, req: RoomRequest, now:
   const flow: Flow = fullyFree.length > 0 ? 'A' : partlyFree.length > 0 ? 'B' : taken.length > 0 ? 'C' : 'none';
   // Only worth saying when there is a room to book at all.
   if (requesterEmail && flow !== 'none') {
-    const own = await ownBookingClashes(gw, requesterEmail, [req], now);
+    const own = await ownBookingClashes(gw, requesterEmail, [req], req.agendaType, now);
     warnings.push(...own.map((o) => `${o} One room per person at a time: cancel it first, or pick another time.`));
   }
   return { ok: true, problems, warnings, request: req, flow, fullyFree, partlyFree, taken, alternatives, ...(requested ? { requested } : {}) };
@@ -15285,6 +15306,24 @@ test('My bookings lists every upcoming booking, however far ahead, including req
   const nextWeek = await json(await routes.mine(get('/api/bookings/mine?to=2026-10-05T00:00:00%2B08:00'), noParams));
   assert.ok(!nextWeek.bookings.some((b: { ticketNo: string }) => b.ticketNo === booked.ticketNo), '`to` still limits the list');
 });
+
+test('several Training rooms at once: no one-room warning when searching, and both cards confirm', async () => {
+  const lili = as('LILI.LAGUNOY');
+  const at = { start: '2026-09-30T14:00:00+08:00', end: '2026-09-30T16:00:00+08:00' };
+  const training = { agendaType: 'Training', agenda: 'Onboarding bootcamp', participants: 12, ...at };
+  const confirm = async (roomId: string) => {
+    const card = await json(await routes.propose(post('/api/proposals', { ...training, roomId }, lili), noParams));
+    assert.equal(card.ok, true, card.message);
+    const id = card.proposal.id as string;
+    return routes.confirm(post(`/api/proposals/${id}`, undefined, lili), { params: Promise.resolve({ id }) });
+  };
+  assert.equal((await confirm('snowdon')).status, 200);
+  const search = await json(await routes.search(post('/api/search', { agendaType: 'Training', participants: 12, ...at }, lili), noParams));
+  assert.deepEqual(search.warnings, [], 'no "one room per person" warning for a second training room');
+  assert.equal((await confirm('denali')).status, 200);
+  const mine = await json(await routes.mine(get('/api/bookings/mine', lili), noParams));
+  assert.deepEqual(mine.bookings.filter((b: { start: string }) => b.start === new Date(at.start).toISOString()).map((b: { roomId: string }) => b.roomId).sort(), ['denali', 'snowdon']);
+});
 ```
 
 ## Tests (src/data/__tests__)
@@ -15436,7 +15475,7 @@ test('cancelled bookings and expired holds do not block; live holds do', () => {
 });
 
 test('ownConflicts: the same person in any room at an overlapping time, never cancelled ones or other people', () => {
-  const want = { start: manila(2026, 9, 28, 15), end: manila(2026, 9, 28, 16) };
+  const want = { start: manila(2026, 9, 28, 15), end: manila(2026, 9, 28, 16), agendaType: 'Meeting' as const };
   const other = { ...owner, name: 'Tester, Bravo', email: 'bravo@example.com' };
   const bookings = [
     booking('tokyo', manila(2026, 9, 28, 15, 30), manila(2026, 9, 28, 16, 30), { ticketNo: 'RM-1' }),
@@ -15449,6 +15488,21 @@ test('ownConflicts: the same person in any room at an overlapping time, never ca
     ['RM-1'],
   );
   assert.deepEqual(ownConflicts('nobody@example.com', want, bookings, now), []);
+});
+
+test("ownConflicts: Training and Multi-purpose bookings may be held several at once (the owner's request)", () => {
+  const at = { start: manila(2026, 9, 28, 15), end: manila(2026, 9, 28, 16) };
+  const meeting = booking('amsterdam', at.start, at.end, { ticketNo: 'RM-M' });
+  const training = booking('snowdon', at.start, at.end, { ticketNo: 'RM-T', agendaType: 'Training' });
+  const hall = booking('mph1', at.start, at.end, { ticketNo: 'RM-H', agendaType: 'Multi-purpose' });
+  const mine = [meeting, training, hall];
+  // A new Training or Multi-purpose booking clashes with nothing of theirs, not even a meeting.
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Training' }, mine, now), []);
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Multi-purpose' }, mine, now), []);
+  // A new Meeting or Lactation Room booking clashes with their meeting only: their training and hall don't count.
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Meeting' }, mine, now).map((b) => b.ticketNo), ['RM-M']);
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Lactation Room' }, mine, now).map((b) => b.ticketNo), ['RM-M']);
+  assert.deepEqual(ownConflicts(owner.email, { ...at, agendaType: 'Meeting' }, [training, hall], now), []);
 });
 
 test('flow B: partly free returns the free part and who has the rest', () => {
@@ -16087,6 +16141,29 @@ test('Admin swaps the rooms of two bookings in one step, and edits room details'
   assert.equal(room.name, 'Cape Town');
   assert.equal((await gw.listRooms()).find((r) => r.id === 'capetown')?.notes, 'New screen');
   await assert.rejects(gw.updateRoom('capetown', { capacity: 7 }, alpha), NotAllowedError);
+});
+
+test('one room per person leaves out Training and Multi-purpose: a person may hold several of those at once', async () => {
+  const gw = emptyGateway();
+  const training = (roomId: string) => ({ ...request(roomId, mark, 10), agendaType: 'Training' as const });
+  const hall = (roomId: string) => ({ ...request(roomId, mark, 40), agendaType: 'Multi-purpose' as const });
+  await gw.createBooking(training('snowdon'));
+  await gw.createBooking(training('denali'));
+  await gw.createBooking(hall('mph1'));
+  await gw.createBooking(hall('mph2'));
+  // A meeting then too: Training and Multi-purpose bookings don't count. A second meeting does.
+  await gw.createBooking(request('capetown'));
+  await assert.rejects(gw.createBooking(request('amsterdam')), (err: unknown) => err instanceof ConflictError && err.kind === 'requester' && err.conflicts[0]?.roomId === 'capetown');
+  // A room still holds one booking at a time.
+  await assert.rejects(gw.createBooking(training('snowdon')), (err: unknown) => err instanceof ConflictError && err.kind === 'room');
+});
+
+test('an Admin change of type checks the owner again: a Training may overlap their meeting, a Meeting may not', async () => {
+  const gw = emptyGateway();
+  await gw.createBooking(request('capetown'));
+  const t = await gw.createBooking({ ...request('johannesburg'), agendaType: 'Training' });
+  await assert.rejects(gw.updateBooking(t.ticketNo, { agendaType: 'Meeting' }, admin), (e: unknown) => e instanceof ConflictError && e.kind === 'requester');
+  assert.equal((await gw.updateBooking(t.ticketNo, { agenda: 'Excel basics' }, admin)).agendaType, 'Training', 'other changes still work');
 });
 ```
 

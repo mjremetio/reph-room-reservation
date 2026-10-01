@@ -20,7 +20,7 @@ export const INSTRUCTIONS = [
   'Times are Asia/Manila (UTC+8); pass ISO 8601 with the +08:00 offset.',
   'Call find_rooms before saying a room is free, and room_schedule for who booked a room and when.',
   `propose_booking and request_cancellation only prepare: give the person the confirm_url; nothing is booked or cancelled until they press Confirm there (within ${RULES.linkProposalHoldMinutes} minutes).`,
-  'Agenda titles must be specific ("Q4 pipeline review"), not just "Meeting" or "Training". One room per person at a time.',
+  `Agenda titles must be specific ("Q4 pipeline review"), not just "Meeting" or "Training". One room per person at a time, except ${RULES.severalRoomsAtOnce.join(' and ')} bookings (several at once are fine).`,
   "Share only the owner's name, division, time, group size and status of other people's bookings.",
 ].join(' ');
 

@@ -46,15 +46,16 @@ export function clash(kind: 'room' | 'requester', conflicts: Booking[], rooms: R
 }
 
 /**
- * Whether `next` fits: its room free then (apart from `except`) and, when its time moved, its owner holding no other
- * room then (one room per person). A booking that keeps its time can't create a new overlap for its owner.
+ * Whether `next` fits: its room free then (apart from `except`) and, when its time or type changed, its owner holding
+ * no other room then (one room per person; a Training or Multi-purpose booking may overlap, countsForOneRoom). A booking
+ * that keeps its time and type can't create a new overlap for its owner.
  */
-async function fits(gw: ReservationGateway, next: Booking, except: Booking[], rooms: Room[], now: Date, timeMoved: boolean): Promise<Failed | null> {
+async function fits(gw: ReservationGateway, next: Booking, except: Booking[], rooms: Room[], now: Date, recheckOwner: boolean): Promise<Failed | null> {
   const skip = (b: Booking) => except.some((x) => x.ticketNo === b.ticketNo);
   const around = (await gw.getBookings({ roomIds: [next.roomId], from: next.start, to: next.end })).filter((b) => !skip(b));
   const taken = conflictsFor(next.roomId, next, around, now);
   if (taken.length > 0) return clash('room', taken, rooms);
-  if (timeMoved && RULES.oneRoomPerPersonAtATime && next.owner.email) {
+  if (recheckOwner && RULES.oneRoomPerPersonAtATime && next.owner.email) {
     const mine = (await gw.listMyBookings(next.owner.email, next.start, next.end)).filter((b) => !skip(b));
     const own = ownConflicts(next.owner.email, next, mine, now);
     if (own.length > 0) return clash('requester', own, rooms);
@@ -86,8 +87,8 @@ export async function prepareAdminChange(
   if (blocking.length > 0) {
     return { ok: false, code: 'INVALID', problems: blocking.map((i) => i.message), fields: [...new Set(blocking.map((i) => ISSUE_FIELD[i.code]))] };
   }
-  const timeMoved = after.start.getTime() !== before.start.getTime() || after.end.getTime() !== before.end.getTime();
-  const clashes = await fits(gw, after, [before], rooms, now, timeMoved);
+  const recheckOwner = after.start.getTime() !== before.start.getTime() || after.end.getTime() !== before.end.getTime() || after.agendaType !== before.agendaType;
+  const clashes = await fits(gw, after, [before], rooms, now, recheckOwner);
   return clashes ?? { ok: true, value: { before, after, rooms } };
 }
 

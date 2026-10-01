@@ -122,7 +122,7 @@ export async function searchRooms(gw: ReservationGateway, req: RoomRequest, now:
   const flow: Flow = fullyFree.length > 0 ? 'A' : partlyFree.length > 0 ? 'B' : taken.length > 0 ? 'C' : 'none';
   // Only worth saying when there is a room to book at all.
   if (requesterEmail && flow !== 'none') {
-    const own = await ownBookingClashes(gw, requesterEmail, [req], now);
+    const own = await ownBookingClashes(gw, requesterEmail, [req], req.agendaType, now);
     warnings.push(...own.map((o) => `${o} One room per person at a time: cancel it first, or pick another time.`));
   }
   return { ok: true, problems, warnings, request: req, flow, fullyFree, partlyFree, taken, alternatives, ...(requested ? { requested } : {}) };

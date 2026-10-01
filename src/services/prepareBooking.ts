@@ -9,7 +9,7 @@ import { HARDWARE_OPTIONS } from '../config/hardware';
 import { availabilityFor, ownConflicts } from '../domain/availability';
 import { sameEmail } from '../domain/people';
 import { describeRecurrence, expandRecurrence, toRecurrenceJson, type Recurrence } from '../domain/recurrence';
-import { ISSUE_FIELD, RULES, validateRequest, type FormField } from '../domain/rules';
+import { countsForOneRoom, ISSUE_FIELD, RULES, validateRequest, type FormField } from '../domain/rules';
 import { formatManila, formatRange } from '../domain/time';
 import type { AgendaType, Interval, Person, Priority, RoomRequest, TrainingType } from '../domain/types';
 import type { ReservationGateway } from '../gateway/ReservationGateway';
@@ -75,7 +75,7 @@ export async function prepareBooking(
     const problems = draft.recurrence ? [`${room.name} is not free on ${clashes.length} of ${dates.length} dates.`, ...clashes.slice(0, 5)] : [`${room.name} is no longer free for that whole time.`];
     return { ok: false, code: 'CONFLICT', problems, fields: draft.recurrence ? ['room', 'recurrence'] : ['room', 'time'] };
   }
-  const own = await ownBookingClashes(gw, user.email, dates, now);
+  const own = await ownBookingClashes(gw, user.email, dates, draft.agendaType, now);
   if (own.length > 0) {
     const problems = draft.recurrence
       ? [`One room per person at a time: you already have a room on ${own.length} of ${dates.length} dates.`, ...own.slice(0, 5)]
@@ -115,14 +115,15 @@ export async function prepareBooking(
 /**
  * RULES.oneRoomPerPersonAtATime: for each date, the requester's own booking that already holds a room then, e.g.
  * "You already have Tokyo, 2F on Mon, Sep 28, 10:00–11:00 AM (RM-0129902)." Shared with searchRooms' warning.
+ * None for a Training or Multi-purpose booking: those may be held several at once (countsForOneRoom).
  */
-export async function ownBookingClashes(gw: ReservationGateway, email: string, dates: Interval[], now: Date): Promise<string[]> {
-  if (!RULES.oneRoomPerPersonAtATime || dates.length === 0) return [];
+export async function ownBookingClashes(gw: ReservationGateway, email: string, dates: Interval[], agendaType: AgendaType, now: Date): Promise<string[]> {
+  if (!countsForOneRoom(agendaType) || dates.length === 0) return [];
   const mine = await gw.listMyBookings(email, (dates[0] as Interval).start, (dates[dates.length - 1] as Interval).end);
   if (mine.length === 0) return [];
   const rooms = new Map((await gw.listRooms()).map((r) => [r.id, r] as const));
   return dates.flatMap((d) =>
-    ownConflicts(email, d, mine, now).map((b) => {
+    ownConflicts(email, { ...d, agendaType }, mine, now).map((b) => {
       const room = rooms.get(b.roomId);
       const where = room ? `${room.name}, ${room.floor}` : b.roomId;
       return `You already have ${where} on ${formatRange(b.start, b.end)} (${b.ticketNo}).`;

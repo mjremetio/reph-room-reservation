@@ -488,3 +488,21 @@ test('My bookings lists every upcoming booking, however far ahead, including req
   const nextWeek = await json(await routes.mine(get('/api/bookings/mine?to=2026-10-05T00:00:00%2B08:00'), noParams));
   assert.ok(!nextWeek.bookings.some((b: { ticketNo: string }) => b.ticketNo === booked.ticketNo), '`to` still limits the list');
 });
+
+test('several Training rooms at once: no one-room warning when searching, and both cards confirm', async () => {
+  const lili = as('LILI.LAGUNOY');
+  const at = { start: '2026-09-30T14:00:00+08:00', end: '2026-09-30T16:00:00+08:00' };
+  const training = { agendaType: 'Training', agenda: 'Onboarding bootcamp', participants: 12, ...at };
+  const confirm = async (roomId: string) => {
+    const card = await json(await routes.propose(post('/api/proposals', { ...training, roomId }, lili), noParams));
+    assert.equal(card.ok, true, card.message);
+    const id = card.proposal.id as string;
+    return routes.confirm(post(`/api/proposals/${id}`, undefined, lili), { params: Promise.resolve({ id }) });
+  };
+  assert.equal((await confirm('snowdon')).status, 200);
+  const search = await json(await routes.search(post('/api/search', { agendaType: 'Training', participants: 12, ...at }, lili), noParams));
+  assert.deepEqual(search.warnings, [], 'no "one room per person" warning for a second training room');
+  assert.equal((await confirm('denali')).status, 200);
+  const mine = await json(await routes.mine(get('/api/bookings/mine', lili), noParams));
+  assert.deepEqual(mine.bookings.filter((b: { start: string }) => b.start === new Date(at.start).toISOString()).map((b: { roomId: string }) => b.roomId).sort(), ['denali', 'snowdon']);
+});

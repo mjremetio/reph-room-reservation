@@ -214,6 +214,11 @@ next-env.d.ts
 .env*.local
 evals/last-run.md
 .DS_Store
+# Vercel CLI (vercel link): the project link and env files stay on this machine; the template is committed.
+# vercel link appends ".vercel" and ".env*" again: remove them, or .env.example drops out of git.
+.vercel
+.env*
+!.env.example
 ```
 (`evals/last-run.md` is written by every full eval run and not committed.)
 

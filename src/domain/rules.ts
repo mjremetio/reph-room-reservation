@@ -59,6 +59,11 @@ export const RULES = {
    */
   oneRoomPerPersonAtATime: true,
   /**
+   * The owner's request (1 Oct 2026): these Types of agenda may be held several at a time (a training in Snowdon and
+   * Denali, an event in MPH 1 and MPH 2), so they don't count for one room per person, either way (countsForOneRoom).
+   */
+  severalRoomsAtOnce: ['Training', 'Multi-purpose'] as AgendaType[],
+  /**
    * Our own rule (Admin pages, 30 Sep 2026): the checks Admin may set aside when changing a booking. The self-service
    * booking window, Admin-only rooms (Admin books the visitor offices, Guidelines p.11) and the Urgent hint.
    * OPEN: which rules bind Admin in the tool? The rest (times, participants, agenda, training shift, clashes, and the
@@ -66,6 +71,14 @@ export const RULES = {
    */
   adminMayOverride: ['TOO_FAR_AHEAD', 'NOT_SELF_BOOKABLE', 'URGENT_NOT_ALLOWED'] as IssueCode[],
 };
+
+/**
+ * Whether a booking of this type counts for one room per person at a time: neither blocked by the person's other
+ * bookings nor blocking them when it doesn't (RULES.severalRoomsAtOnce).
+ */
+export function countsForOneRoom(agendaType: AgendaType): boolean {
+  return RULES.oneRoomPerPersonAtATime && !RULES.severalRoomsAtOnce.includes(agendaType);
+}
 
 /** The status a new booking gets from the tool: "In Progress" while it waits for Admin (RULES.needsApproval), else Approved. */
 export function initialStatus(agendaType: AgendaType): BookingStatus {

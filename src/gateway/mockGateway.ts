@@ -120,7 +120,7 @@ export class MockGateway implements ReservationGateway {
     const conflicts = dates.flatMap((d) => conflictsFor(req.roomId, d, this.bookings, this.now()));
     if (conflicts.length > 0) throw new ConflictError(conflicts.map(clone));
     if (RULES.oneRoomPerPersonAtATime && req.requester.email) {
-      const own = dates.flatMap((d) => ownConflicts(req.requester.email as string, d, this.bookings, this.now()));
+      const own = dates.flatMap((d) => ownConflicts(req.requester.email as string, { ...d, agendaType: req.agendaType }, this.bookings, this.now()));
       if (own.length > 0) throw new ConflictError(own.map(clone), 'requester');
     }
     const created: Booking[] = dates.map((d) => ({
@@ -221,7 +221,8 @@ export class MockGateway implements ReservationGateway {
       if (wrong) throw new NotAllowedError(wrong.message);
     }
     const others = this.bookings.filter((x) => x !== b);
-    this.assertFits(next, others, next.start.getTime() !== b.start.getTime() || next.end.getTime() !== b.end.getTime());
+    // A new time, or a new type (a Training may overlap the owner's meeting; a Meeting may not), checks the owner again.
+    this.assertFits(next, others, next.start.getTime() !== b.start.getTime() || next.end.getTime() !== b.end.getTime() || next.agendaType !== b.agendaType);
     Object.assign(b, set);
     // Type of Training belongs to training bookings only (RULES: Type of Training); On-Site unless Virtual.
     if (b.agendaType === 'Training') b.trainingType ??= 'On-Site';
@@ -267,11 +268,11 @@ export class MockGateway implements ReservationGateway {
     return { ...r };
   }
 
-  /** The room is free for `next` and, when its time moved, its owner holds no other room then (one room per person). */
-  private assertFits(next: Booking, others: Booking[], timeMoved: boolean): void {
+  /** The room is free for `next` and, when its time or type changed, its owner holds no other room then (one room per person). */
+  private assertFits(next: Booking, others: Booking[], recheckOwner: boolean): void {
     const conflicts = conflictsFor(next.roomId, next, others, this.now());
     if (conflicts.length > 0) throw new ConflictError(conflicts.map(clone));
-    if (timeMoved && RULES.oneRoomPerPersonAtATime && next.owner.email) {
+    if (recheckOwner && RULES.oneRoomPerPersonAtATime && next.owner.email) {
       const own = ownConflicts(next.owner.email, next, others, this.now());
       if (own.length > 0) throw new ConflictError(own.map(clone), 'requester');
     }
