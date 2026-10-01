@@ -11,9 +11,10 @@ import { ScheduleCard } from './cards/ScheduleCard';
 import { fmtWhen } from './format';
 import { RichText } from './RichText';
 import { useAppState, useDispatch, type Card, type Message } from './store';
+import { SuggestionGroups, type SuggestionGroup } from './Suggestions';
 
 /** Suggested requests and frequent questions, by topic (docs/spec/06-ui.md, Suggestions). Each one works on the demo week. */
-export const SUGGESTIONS: ReadonlyArray<{ topic: string; items: readonly string[] }> = [
+export const SUGGESTIONS: readonly SuggestionGroup[] = [
   {
     topic: 'Book a room',
     items: ['Room for 5 today from 3 to 4 PM', 'VC room for 8 tomorrow from 10 to 11 AM', 'Training room for 15 on Wednesday, 9 AM to 12 PM', 'Hall for 60 on Friday from 1 to 5 PM'],
@@ -38,26 +39,6 @@ export const SUGGESTIONS: ReadonlyArray<{ topic: string; items: readonly string[
     ],
   },
 ];
-
-/** The suggestions as chips under topic headings. */
-function Suggestions({ onPick, disabled }: { onPick: (text: string) => void; disabled?: boolean }) {
-  return (
-    <div className="suggestions">
-      {SUGGESTIONS.map((g) => (
-        <div key={g.topic} className="suggestions__group" role="group" aria-label={g.topic}>
-          <div className="suggestions__topic">{g.topic}</div>
-          <div className="chips">
-            {g.items.map((item) => (
-              <button key={item} className="chip" onClick={() => onPick(item)} disabled={disabled}>
-                {item}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function CardView({ card }: { card: Card }) {
   switch (card.type) {
@@ -211,7 +192,7 @@ export function ChatPanel() {
           <div className="welcome">
             <h1>Book a room</h1>
             <p>Tell me when, how many people, and what it&apos;s for. Or ask who has a room, or anything about booking.</p>
-            <Suggestions onPick={pick} disabled={offline} />
+            <SuggestionGroups groups={SUGGESTIONS} onPick={pick} disabled={offline} />
           </div>
         )}
         {state.messages.map((m) => (
@@ -236,7 +217,7 @@ export function ChatPanel() {
         )}
         {ideas && state.messages.length > 0 && (
           <div className="ideas" id="ideas">
-            <Suggestions onPick={pick} disabled={offline || state.streaming} />
+            <SuggestionGroups groups={SUGGESTIONS} onPick={pick} disabled={offline || state.streaming} />
           </div>
         )}
       </div>

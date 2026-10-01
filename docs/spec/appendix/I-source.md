@@ -6870,9 +6870,10 @@ import { ScheduleCard } from './cards/ScheduleCard';
 import { fmtWhen } from './format';
 import { RichText } from './RichText';
 import { useAppState, useDispatch, type Card, type Message } from './store';
+import { SuggestionGroups, type SuggestionGroup } from './Suggestions';
 
 /** Suggested requests and frequent questions, by topic (docs/spec/06-ui.md, Suggestions). Each one works on the demo week. */
-export const SUGGESTIONS: ReadonlyArray<{ topic: string; items: readonly string[] }> = [
+export const SUGGESTIONS: readonly SuggestionGroup[] = [
   {
     topic: 'Book a room',
     items: ['Room for 5 today from 3 to 4 PM', 'VC room for 8 tomorrow from 10 to 11 AM', 'Training room for 15 on Wednesday, 9 AM to 12 PM', 'Hall for 60 on Friday from 1 to 5 PM'],
@@ -6897,26 +6898,6 @@ export const SUGGESTIONS: ReadonlyArray<{ topic: string; items: readonly string[
     ],
   },
 ];
-
-/** The suggestions as chips under topic headings. */
-function Suggestions({ onPick, disabled }: { onPick: (text: string) => void; disabled?: boolean }) {
-  return (
-    <div className="suggestions">
-      {SUGGESTIONS.map((g) => (
-        <div key={g.topic} className="suggestions__group" role="group" aria-label={g.topic}>
-          <div className="suggestions__topic">{g.topic}</div>
-          <div className="chips">
-            {g.items.map((item) => (
-              <button key={item} className="chip" onClick={() => onPick(item)} disabled={disabled}>
-                {item}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function CardView({ card }: { card: Card }) {
   switch (card.type) {
@@ -7070,7 +7051,7 @@ export function ChatPanel() {
           <div className="welcome">
             <h1>Book a room</h1>
             <p>Tell me when, how many people, and what it&apos;s for. Or ask who has a room, or anything about booking.</p>
-            <Suggestions onPick={pick} disabled={offline} />
+            <SuggestionGroups groups={SUGGESTIONS} onPick={pick} disabled={offline} />
           </div>
         )}
         {state.messages.map((m) => (
@@ -7095,7 +7076,7 @@ export function ChatPanel() {
         )}
         {ideas && state.messages.length > 0 && (
           <div className="ideas" id="ideas">
-            <Suggestions onPick={pick} disabled={offline || state.streaming} />
+            <SuggestionGroups groups={SUGGESTIONS} onPick={pick} disabled={offline || state.streaming} />
           </div>
         )}
       </div>
@@ -11426,7 +11407,9 @@ import { adminApi, api } from '../api';
 import { fmtSpan } from '../format';
 import { RichText } from '../RichText';
 import { readSse } from '../sse';
+import { SuggestionGroups } from '../Suggestions';
 import { useAdminAction } from './shared';
+import { ADMIN_SUGGESTIONS } from './suggestions';
 
 type AdminCard = Extract<UiEvent, { type: 'admin_action' | 'admin_change' | 'admin_swap' | 'admin_message' | 'room_schedule' }>;
 type Part = { kind: 'text'; text: string } | { kind: 'card'; id: string; card: AdminCard };
@@ -11481,7 +11464,6 @@ function reducer(s: State, a: Action): State {
   }
 }
 
-const SUGGESTIONS = ['What needs approval?', 'Any no-shows today?', 'Which rooms were busiest this week?', "What's booked on 3F today?", 'Who has Batanes tomorrow?'];
 const DOWN = "The assistant isn't available right now. You can still do everything from the Admin pages.";
 
 /** A card with one button that calls /api/admin/*; after it worked, it says so and can't be pressed again. */
@@ -11690,15 +11672,7 @@ export function AdminAssistant({ hidden, onHide, onStreaming, onReply }: {
           <div className="welcome">
             <h1>Manage bookings</h1>
             <p>Ask about requests, bookings, rooms or usage. I prepare approvals, changes, swaps and messages as cards; nothing changes until you press a card&apos;s button.</p>
-            <div className="suggestions">
-              <div className="chips">
-                {SUGGESTIONS.map((q) => (
-                  <button key={q} className="chip" onClick={() => void send(q)}>
-                    {q}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <SuggestionGroups groups={ADMIN_SUGGESTIONS} onPick={(q) => void send(q)} />
           </div>
         )}
         {s.messages.map((m) =>

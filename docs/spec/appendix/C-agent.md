@@ -1804,7 +1804,7 @@ export const ADMIN_OFF_TOPIC_REPLY =
   'I can only help Admin with room reservations at REPH: requests waiting for approval, bookings, changes and swaps, messages to owners, room schedules and usage reports. Try "What needs approval today?".';
 
 /** Admin talk that is always in scope for the Admin assistant, on top of BOOKING_WORDS. */
-const ADMIN_WORDS =
+export const ADMIN_WORDS =
   /\b(approv(e|ed|al|als)|reject(ed)?|turn(ed)? down|decline|requests?|pending|waiting|queue|reports?|usage|utili[sz]ation|no[- ]?shows?|busiest|least|stats?|statistics|trends?|owners?|message|reply|remind|tickets?|rm-\d+|move|extend|shorten|change|division|requesters?)\b/i;
 
 const BOOKING_WORDS =

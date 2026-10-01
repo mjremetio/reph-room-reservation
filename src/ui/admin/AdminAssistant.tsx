@@ -12,7 +12,9 @@ import { adminApi, api } from '../api';
 import { fmtSpan } from '../format';
 import { RichText } from '../RichText';
 import { readSse } from '../sse';
+import { SuggestionGroups } from '../Suggestions';
 import { useAdminAction } from './shared';
+import { ADMIN_SUGGESTIONS } from './suggestions';
 
 type AdminCard = Extract<UiEvent, { type: 'admin_action' | 'admin_change' | 'admin_swap' | 'admin_message' | 'room_schedule' }>;
 type Part = { kind: 'text'; text: string } | { kind: 'card'; id: string; card: AdminCard };
@@ -67,7 +69,6 @@ function reducer(s: State, a: Action): State {
   }
 }
 
-const SUGGESTIONS = ['What needs approval?', 'Any no-shows today?', 'Which rooms were busiest this week?', "What's booked on 3F today?", 'Who has Batanes tomorrow?'];
 const DOWN = "The assistant isn't available right now. You can still do everything from the Admin pages.";
 
 /** A card with one button that calls /api/admin/*; after it worked, it says so and can't be pressed again. */
@@ -276,15 +277,7 @@ export function AdminAssistant({ hidden, onHide, onStreaming, onReply }: {
           <div className="welcome">
             <h1>Manage bookings</h1>
             <p>Ask about requests, bookings, rooms or usage. I prepare approvals, changes, swaps and messages as cards; nothing changes until you press a card&apos;s button.</p>
-            <div className="suggestions">
-              <div className="chips">
-                {SUGGESTIONS.map((q) => (
-                  <button key={q} className="chip" onClick={() => void send(q)}>
-                    {q}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <SuggestionGroups groups={ADMIN_SUGGESTIONS} onPick={(q) => void send(q)} />
           </div>
         )}
         {s.messages.map((m) =>
