@@ -2880,14 +2880,14 @@ export const ACCOUNTS: readonly Account[] = [
     email: 'markjoseph.remetio@lexisnexis.com',
     division: 'Sales',
     role: 'admin',
-    passwordHash: 'scrypt$Ain53ts7QIS92VcSt1MUhw$0sEmE4JgX9qg6wS9fgfAu1yvmyafGoonAjmU1UfSAqU',
+    passwordHash: 'scrypt$p-9rd5b60ddhQrxkoRk1dw$hAMFsx8F_8kZhDPLLFyu62h1yVMOet6qbLpeeg97uGs',
   },
   {
     login: 'JEREMIAH.SANDOVAL',
     name: 'Sandoval, Jeremiah',
     email: 'jeremiah.sandoval@lexisnexis.com',
     role: 'user',
-    passwordHash: 'scrypt$Fvd7mvfr-nxGos2UqNxmXg$d9tTqRMsMgVRYBnhax33vWMSDCqYipb-BQWSkD_Cy84',
+    passwordHash: 'scrypt$4cr1JfL-VF6syySdDP5i2g$nwW9AFmM7UaRnEw6kaB4TntR35EMVGJrYtputhqy8-s',
   },
   {
     login: 'LILI.LAGUNOY',
