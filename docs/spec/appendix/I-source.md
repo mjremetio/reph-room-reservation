@@ -6328,9 +6328,10 @@ import { MemoryStore, type StoreSnapshot } from '../store/memoryStore';
 
 /**
  * Bump when the snapshot's shape or the seed accounts change: a saved state in an older format is replaced by this
- * instance's fresh demo. 2: the sign-in accounts' work e-mails and the new people (1 Oct 2026).
+ * instance's fresh demo. 2: the sign-in accounts' work e-mails and the new people (1 Oct 2026). 3: new passwords for
+ * markjoseph.remetio and jeremiah.sandoval (4 Nov 2026).
  */
-const FORMAT = 2;
+const FORMAT = 3;
 const STATE = kvKey('state');
 const VERSION = kvKey('state', 'version');
 const LOCK = kvKey('state', 'lock');
